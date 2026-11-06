@@ -1,0 +1,6 @@
+# Temporales y respaldos
+*~
+*.swp
+*.log
+.DS_Store
+Thumbs.db
