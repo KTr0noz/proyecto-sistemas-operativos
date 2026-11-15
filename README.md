@@ -1,25 +1,24 @@
 # Proyecto Final de Sistemas Operativos
 
-Plataforma cliente-servidor multiplataforma (**GNU/Linux** y **Windows**) para la **monitorización periódica de recursos** y la **ejecución remota de comandos UNIX** mediante sockets TCP y concurrencia con goroutines en **Go**.
+Plataforma cliente-servidor multiplataforma (**GNU/Linux** y **Windows**) para la **monitorización periódica de recursos** y la **ejecución remota de comandos UNIX** mediante sockets TCP, goroutines e interfaz gráfica **Fyne (OperGUI)** en **Go**.
 
 ---
 
-## 1. Estructura Simplificada del Proyecto
+## 1. Estructura del Proyecto
 
 ```text
 Proyecto/
 ├── servidor/
-│   ├── main.go            # Servidor TCP Linux: lee .conf, valida SHA-256, goroutine de /proc y ejecuta bash
+│   ├── main.go            # Servidor TCP Linux: lee .conf, valida SHA-256, mide /proc y ejecuta bash
 │   ├── servidor.conf      # Archivo plano de configuracion (IP, puerto, intentos, usuarios permitidos)
-│   └── usuarios.db        # Base de datos plana de usuarios y hashes SHA-256
+│   └── usuarios.db        # Base de datos plana (usuario:hash_sha256)
 ├── cliente/
-│   └── main.go            # Cliente TCP Windows: valida CLI, captura clave sin eco y terminal concurrente
+│   └── main.go            # Cliente Windows: login oculto en consola + ventana OperGUI (3 barras)
 ├── dist/                  # Binarios compilados listos para ejecutar
-│   ├── linux-amd64/       # servidorOperativos (ELF estatico x86_64) + clienteOperativos
-│   └── windows-amd64/     # clienteOperativos.exe (Windows x86_64)
+│   ├── linux-amd64/       # servidorOperativos (ELF estatico x86_64)
+│   └── windows-amd64/     # clienteOperativos.exe (Windows GUI con Fyne)
 ├── compilar.ps1           # Script de compilacion en Windows (PowerShell)
-├── compilar.sh            # Script de compilacion en Linux/WSL (sh)
-├── Paper_Final_Sistemas_Operativos_IEEE.docx
+├── compilar.sh            # Script de compilacion del servidor en Linux/WSL (sh)
 └── README.md
 ```
 
@@ -37,48 +36,40 @@ El archivo `usuarios.db` contiene las credenciales con hash SHA-256:
 
 ---
 
-## 3. Guía de Ejecución
+## 3. Guía de Ejecución (WSL Ubuntu + Windows PowerShell)
 
-### Opción A: Probar en tu PC (WSL Ubuntu + Windows PowerShell)
-
-#### Paso 1: Iniciar el Servidor en Linux / WSL
-Abre una terminal de **Ubuntu (WSL)** y ejecuta:
-
+### Paso 1: Iniciar el Servidor en Linux / WSL
 ```bash
-cd "c:/Carpetas/estudio/Universidad/Semestres/Cuarto Semestre/Operating Systems/Proyecto/dist/linux-amd64"
+cd "/mnt/c/Carpetas/estudio/Universidad/Semestres/Cuarto Semestre/Operating Systems/Proyecto/dist/linux-amd64"
 chmod +x servidorOperativos
 ./servidorOperativos
 ```
 
-#### Paso 2: Conectar el Cliente desde Windows
-Abre **PowerShell** y ejecuta los 3 parámetros pedidos por el profesor (`<IP> <Puerto> <PeriodoReporte>`):
-
+### Paso 2: Conectar el Cliente desde Windows
 ```powershell
 cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\Proyecto\dist\windows-amd64"
 .\clienteOperativos.exe 127.0.0.1 2306 5
 ```
 
-1. Ingresa el usuario: `admin`
-2. Ingresa la contraseña: `linux` (no se muestra en pantalla mientras escribes)
-3. ¡Listo! Ya estás conectado:
-   - Cada 5 segundos verás el reporte de recursos de Linux (`CPU`, `RAM`, `Procesos`, `Disco`).
-   - Puedes escribir cualquier comando UNIX: `uname -a`, `ls -la`, `pwd`, `uptime`, `whoami`.
-   - Para salir, escribe: `bye`.
+1. En la consola, ingresa usuario (`admin`) y contraseña (`linux`, sin eco en pantalla).
+2. Al autenticarse correctamente, se abrirá la ventana **OperGUI (`Proyecto Operativos - Ramos`)**:
+   * **Comandos UNIX:** Escribe comandos como `uname -a`, `ls -la`, `ps aux` en la caja de texto y presiona **Ejecutar** (o `Enter`). La salida aparece en el panel con desplazamiento sin mezclarse con los reportes.
+   * **Monitoreo en paralelo:** Cada $n$ segundos se actualiza el texto de `Reporte #N` y las **3 barras de progreso** en tiempo real (**CPU**, **RAM** y **Disco**).
+   * **Salir:** Escribe `bye` y presiona **Ejecutar** (o cierra la ventana).
 
 ---
 
-## 4. Cómo Explicar el Código al Profesor (Resumen de 2 Minutos)
+## 4. Cómo Funciona el Código
 
-### Servidor (`servidor/main.go`):
-1. **Configuración:** `cargarConfig("servidor.conf")` lee los parámetros planos de red e intentos permitidos.
-2. **Socket TCP:** `net.Listen("tcp", ":"+cfg.Puerto)` abre el socket y escucha con `Accept()`.
-3. **Autenticación SHA-256:** `validarCredenciales()` lee `usuarios.db` y compara el hash `sha256.Sum256([]byte(password))`.
-4. **Concurrencia (Goroutines en paralelo):**
-   - **Goroutine 1 (`ticker`):** Cada $n$ segundos lee `/proc/stat` (CPU), `/proc/meminfo` (RAM), cuenta carpetas en `/proc` (procesos) y consulta `df -h /` (disco), enviando el reporte por el socket.
-   - **Goroutine 2 (Bucle principal):** Recibe comandos remotos, los ejecuta con `exec.Command("bash", "-c", cmd)` y devuelve la salida. Si recibe `bye`, cierra la sesión.
+### Servidor (`servidor/main.go`)
+1. `cargarConfiguracion("servidor.conf")`: Carga IP permitida, puerto, intentos fallidos y usuarios autorizados.
+2. `autenticarCliente(...)`: Valida usuario y compara el hash `sha256.Sum256` contra `usuarios.db`.
+3. **Paralelismo:**
+   * Goroutine periódica con `time.NewTicker`: lee `/proc/stat` (CPU), `/proc/meminfo` (RAM), procesos en `/proc` y `df -h /` (Disco), enviando el resumen y los porcentajes numéricos.
+   * Bucle principal: atiende comandos remotos ejecutando `bash -c <comando>` y cierra sesión al recibir `bye`.
 
-### Cliente (`cliente/main.go`):
-1. **Parámetros CLI:** Valida que `os.Args` reciba `IP`, `Puerto` y `Periodo`.
-2. **Conexión:** Se conecta con `net.Dial("tcp", ip+":"+puerto)`.
-3. **Seguridad en Terminal:** Lee la contraseña sin eco con `term.ReadPassword(int(os.Stdin.Fd()))`.
-4. **Concurrencia:** Una goroutine asíncrona escucha y presenta las métricas que llegan del servidor mientras el hilo principal lee lo que el usuario tipea por teclado.
+### Cliente (`cliente/main.go`)
+1. Valida los 3 argumentos de línea de comandos (`<IP> <Puerto> <PeriodoReporte>`).
+2. `autenticarEnConsola(...)`: Pide usuario y clave oculta (`term.ReadPassword`).
+3. `iniciarVentanaOperGUI(...)`: Construye la ventana Fyne con caja de comandos, botón `Ejecutar`, panel de salida y 3 barras (`barraCPU`, `barraRAM`, `barraDisco`).
+4. `recibirReportesYRespuestas(...)`: Goroutine en segundo plano que actualiza la interfaz mediante `fyne.Do(...)` cada vez que llega un reporte o una salida de comando.

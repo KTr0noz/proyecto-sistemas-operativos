@@ -1,32 +1,35 @@
 # =====================================================================
-#  Compila el proyecto para Linux y Windows (amd64) en la carpeta dist\
+#  Compila el proyecto para Linux (servidor) y Windows (cliente GUI)
 #  Uso (PowerShell, desde la carpeta Proyecto):   .\compilar.ps1
 # =====================================================================
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
-$env:CGO_ENABLED = '0'
 $flags = @('-trimpath', '-ldflags', '-s -w')
 
 Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force dist\linux-amd64, dist\windows-amd64 | Out-Null
 
-Write-Host '==> Compilando Servidor y Cliente para Linux (amd64)...'
-$env:GOOS = 'linux'; $env:GOARCH = 'amd64'
+Write-Host '==> Compilando Servidor para Linux (amd64)...'
+$env:GOOS = 'linux'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
 go build @flags -o dist\linux-amd64\servidorOperativos .\servidor
-go build @flags -o dist\linux-amd64\clienteOperativos  .\cliente
+if ($LASTEXITCODE -ne 0) { throw 'Error compilando servidorOperativos para Linux' }
 Copy-Item servidor\servidor.conf, servidor\usuarios.db dist\linux-amd64\
 
-# Normalizar finales de linea LF para Linux
 $cf = [IO.File]::ReadAllText("$PWD\dist\linux-amd64\servidor.conf") -replace "`r`n", "`n"
 [IO.File]::WriteAllText("$PWD\dist\linux-amd64\servidor.conf", $cf, (New-Object Text.UTF8Encoding $false))
 $ud = [IO.File]::ReadAllText("$PWD\dist\linux-amd64\usuarios.db") -replace "`r`n", "`n"
 [IO.File]::WriteAllText("$PWD\dist\linux-amd64\usuarios.db", $ud, (New-Object Text.UTF8Encoding $false))
 
-Write-Host '==> Compilando Cliente y Servidor para Windows (amd64)...'
-$env:GOOS = 'windows'; $env:GOARCH = 'amd64'
+Write-Host '==> Compilando Cliente OperGUI (Fyne) para Windows (amd64)...'
+$env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '1'
 go build @flags -o dist\windows-amd64\clienteOperativos.exe .\cliente
+if ($LASTEXITCODE -ne 0) { throw 'Error compilando clienteOperativos.exe para Windows' }
+
+Write-Host '==> Compilando Servidor de prueba para Windows (amd64)...'
+$env:CGO_ENABLED = '0'
 go build @flags -o dist\windows-amd64\servidorOperativos.exe .\servidor
+if ($LASTEXITCODE -ne 0) { throw 'Error compilando servidorOperativos.exe para Windows' }
 Copy-Item servidor\servidor.conf, servidor\usuarios.db dist\windows-amd64\
 
 Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
