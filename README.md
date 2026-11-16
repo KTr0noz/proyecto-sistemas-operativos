@@ -62,14 +62,14 @@ cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\
 ## 4. Cómo Funciona el Código
 
 ### Servidor (`servidor/main.go`)
-1. `cargarConfiguracion("servidor.conf")`: Carga IP permitida, puerto, intentos fallidos y usuarios autorizados.
-2. `autenticarCliente(...)`: Valida usuario y compara el hash `sha256.Sum256` contra `usuarios.db`.
+1. `leerConfiguracion("servidor.conf")`: Carga IP permitida, puerto, intentos fallidos y usuarios autorizados.
+2. `autenticar(...)`: Valida usuario y compara el hash `sha256.Sum256` contra `usuarios.db` mediante `validarUsuario` y `usuarioPermitido`.
 3. **Paralelismo:**
-   * Goroutine periódica con `time.NewTicker`: lee `/proc/stat` (CPU), `/proc/meminfo` (RAM), procesos en `/proc` y `df -h /` (Disco), enviando el resumen y los porcentajes numéricos.
-   * Bucle principal: atiende comandos remotos ejecutando `bash -c <comando>` y cierra sesión al recibir `bye`.
+   * Goroutine periódica `enviarReportes`: lee `/proc/stat` (`leerCPU`), `/proc/meminfo` (`leerRAM`), procesos en `/proc` (`contarProcesos`) y `df /` (`leerDisco`) cada $n$ segundos, enviando el resumen y los porcentajes numéricos.
+   * Bucle principal en `atenderCliente`: atiende comandos remotos ejecutando `bash -c <comando>` y cierra sesión al recibir `bye`.
 
 ### Cliente (`cliente/main.go`)
 1. Valida los 3 argumentos de línea de comandos (`<IP> <Puerto> <PeriodoReporte>`).
-2. `autenticarEnConsola(...)`: Pide usuario y clave oculta (`term.ReadPassword`).
-3. `iniciarVentanaOperGUI(...)`: Construye la ventana Fyne con caja de comandos, botón `Ejecutar`, panel de salida y 3 barras (`barraCPU`, `barraRAM`, `barraDisco`).
-4. `recibirReportesYRespuestas(...)`: Goroutine en segundo plano que actualiza la interfaz mediante `fyne.Do(...)` cada vez que llega un reporte o una salida de comando.
+2. `autenticar(...)`: Pide usuario y clave oculta (`term.ReadPassword`).
+3. `iniciarGUI(...)`: Construye la ventana Fyne con caja de comandos, botón `Ejecutar`, panel de salida y 3 barras (`barraCPU`, `barraRAM`, `barraDisco`).
+4. `recibirMensajes(...)`: Goroutine en segundo plano que actualiza la interfaz mediante `fyne.Do(...)` cada vez que llega un reporte o una salida de comando.

@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -11,7 +9,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -35,7 +32,7 @@ type Configuracion struct {
 }
 
 func main() {
-	config, err := cargarConfiguracion("servidor.conf")
+	config, err := leerConfiguracion("servidor.conf")
 	if err != nil {
 		fmt.Printf("Error cargando servidor.conf: %v\n", err)
 		return
@@ -64,7 +61,11 @@ func main() {
 	}
 }
 
-func atenderCliente(conexion net.Conn, config *Configuracion) {
+func enviar(conexion net.Conn, mensaje Mensaje) error {
+	return json.NewEncoder(conexion).Encode(mensaje)
+}
+
+func atenderCliente(conexion net.Conn, config Configuracion) {
 	defer conexion.Close()
 
 	ipCliente, _, _ := net.SplitHostPort(conexion.RemoteAddr().String())
@@ -75,115 +76,72 @@ func atenderCliente(conexion net.Conn, config *Configuracion) {
 		return
 	}
 
-	decodificador := json.NewDecoder(conexion)
-	codificador := json.NewEncoder(conexion)
-	var bloqueoEnvio sync.Mutex
-
-	enviarMensaje := func(msg Mensaje) error {
-		bloqueoEnvio.Lock()
-		defer bloqueoEnvio.Unlock()
-		return codificador.Encode(msg)
-	}
-
-	usuarioAutenticado, periodoReporte, ok := autenticarCliente(decodificador, enviarMensaje, config, ipCliente)
+	lector := json.NewDecoder(conexion)
+	usuario, periodo, ok := autenticar(conexion, lector, config, ipCliente)
 	if !ok {
 		return
 	}
 
-	sesionActiva := make(chan struct{})
-	defer close(sesionActiva)
+	go enviarReportes(conexion, periodo)
 
-	// Hilo paralelo encargado de enviar metricas reales cada N segundos
-	go func() {
-		numeroReporte := 0
-		temporizador := time.NewTicker(time.Duration(periodoReporte) * time.Second)
-		defer temporizador.Stop()
-
-		for {
-			select {
-			case <-temporizador.C:
-				numeroReporte++
-				textoMetricas, pctCPU, pctRAM, pctDisco := obtenerMetricasLinux()
-				textoReporte := fmt.Sprintf("Reporte #%d | %s", numeroReporte, textoMetricas)
-				err := enviarMensaje(Mensaje{
-					Tipo:            "reporte",
-					Contenido:       textoReporte,
-					PorcentajeCPU:   pctCPU,
-					PorcentajeRAM:   pctRAM,
-					PorcentajeDisco: pctDisco,
-				})
-				if err != nil {
-					return
-				}
-			case <-sesionActiva:
-				return
-			}
-		}
-	}()
-
-	// Bucle principal de la sesion: recibe y ejecuta comandos UNIX remotos
 	for {
-		var mensajeRecibido Mensaje
-		if err := decodificador.Decode(&mensajeRecibido); err != nil {
+		var mensaje Mensaje
+		if err := lector.Decode(&mensaje); err != nil {
 			break
 		}
 
-		if mensajeRecibido.Tipo != "comando" {
+		if mensaje.Tipo != "comando" {
 			continue
 		}
 
-		comando := strings.TrimSpace(mensajeRecibido.Contenido)
+		comando := strings.TrimSpace(mensaje.Contenido)
 		if strings.EqualFold(comando, "bye") {
-			fmt.Printf("[*] Usuario '%s' envio 'bye'. Cerrando sesion.\n", usuarioAutenticado)
-			enviarMensaje(Mensaje{Tipo: "bye", Contenido: "Sesion finalizada."})
+			fmt.Printf("[*] Usuario '%s' envio 'bye'. Cerrando sesion.\n", usuario)
+			enviar(conexion, Mensaje{Tipo: "bye", Contenido: "Sesion finalizada."})
 			break
 		}
 
-		fmt.Printf("[*] Ejecutando comando de '%s': %s\n", usuarioAutenticado, comando)
+		fmt.Printf("[*] Ejecutando comando de '%s': %s\n", usuario, comando)
 		salida, err := exec.Command("bash", "-c", comando).CombinedOutput()
 		if err != nil && len(salida) == 0 {
 			salida = []byte(fmt.Sprintf("Error ejecutando: %v\n", err))
 		}
 
-		enviarMensaje(Mensaje{Tipo: "salida", Contenido: string(salida)})
+		if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: string(salida)}); err != nil {
+			break
+		}
 	}
 }
 
-func autenticarCliente(
-	decodificador *json.Decoder,
-	enviarMensaje func(Mensaje) error,
-	config *Configuracion,
-	ipCliente string,
-) (string, int, bool) {
-	intentosRestantes := config.IntentosFallidos
+func autenticar(conexion net.Conn, lector *json.Decoder, config Configuracion, ipCliente string) (string, int, bool) {
+	intentos := config.IntentosFallidos
 
-	for intentosRestantes > 0 {
-		var mensajeRecibido Mensaje
-		if err := decodificador.Decode(&mensajeRecibido); err != nil {
+	for intentos > 0 {
+		var mensaje Mensaje
+		if err := lector.Decode(&mensaje); err != nil {
 			return "", 0, false
 		}
 
-		if mensajeRecibido.Tipo != "auth" {
-			enviarMensaje(Mensaje{Tipo: "auth_error", Contenido: "Protocolo invalido: se requiere autenticacion"})
+		if mensaje.Tipo != "auth" {
+			enviar(conexion, Mensaje{Tipo: "auth_error", Contenido: "Protocolo invalido: se requiere autenticacion"})
 			return "", 0, false
 		}
 
-		if validarCredenciales(mensajeRecibido.Usuario, mensajeRecibido.Password) &&
-			usuarioPermitido(mensajeRecibido.Usuario, config.UsuariosPermitidos) {
-			periodo := mensajeRecibido.Periodo
+		if validarUsuario(mensaje.Usuario, mensaje.Password) && usuarioPermitido(mensaje.Usuario, config.UsuariosPermitidos) {
+			periodo := mensaje.Periodo
 			if periodo <= 0 {
 				periodo = 5
 			}
-			enviarMensaje(Mensaje{Tipo: "auth_ok", Contenido: "Autenticacion exitosa"})
-			fmt.Printf("[+] Usuario '%s' autenticado exitosamente desde %s\n", mensajeRecibido.Usuario, ipCliente)
-			return mensajeRecibido.Usuario, periodo, true
+			enviar(conexion, Mensaje{Tipo: "auth_ok", Contenido: "Autenticacion exitosa"})
+			fmt.Printf("[+] Usuario '%s' autenticado exitosamente desde %s\n", mensaje.Usuario, ipCliente)
+			return mensaje.Usuario, periodo, true
 		}
 
-		intentosRestantes--
-		fmt.Printf("[-] Intento fallido para '%s'. Quedan %d intentos.\n", mensajeRecibido.Usuario, intentosRestantes)
+		intentos--
+		fmt.Printf("[-] Intento fallido para '%s'. Quedan %d intentos.\n", mensaje.Usuario, intentos)
 
-		if intentosRestantes <= 0 {
-			enviarMensaje(Mensaje{
+		if intentos <= 0 {
+			enviar(conexion, Mensaje{
 				Tipo:              "auth_error",
 				Contenido:         "Limite de intentos fallidos superado. Conexion cerrada.",
 				IntentosRestantes: 0,
@@ -191,32 +149,51 @@ func autenticarCliente(
 			return "", 0, false
 		}
 
-		enviarMensaje(Mensaje{
+		enviar(conexion, Mensaje{
 			Tipo:              "auth_error",
 			Contenido:         "Usuario o contrasena incorrectos.",
-			IntentosRestantes: intentosRestantes,
+			IntentosRestantes: intentos,
 		})
 	}
 
 	return "", 0, false
 }
 
-func cargarConfiguracion(ruta string) (*Configuracion, error) {
-	archivo, err := os.Open(ruta)
-	if err != nil {
-		return nil, err
+func enviarReportes(conexion net.Conn, periodo int) {
+	numero := 0
+	for {
+		time.Sleep(time.Duration(periodo) * time.Second)
+		numero++
+		resumen, pctCPU, pctRAM, pctDisco := obtenerReporte()
+		texto := fmt.Sprintf("Reporte #%d | %s", numero, resumen)
+		err := enviar(conexion, Mensaje{
+			Tipo:            "reporte",
+			Contenido:       texto,
+			PorcentajeCPU:   pctCPU,
+			PorcentajeRAM:   pctRAM,
+			PorcentajeDisco: pctDisco,
+		})
+		if err != nil {
+			return
+		}
 	}
-	defer archivo.Close()
+}
 
-	config := &Configuracion{
+func leerConfiguracion(ruta string) (Configuracion, error) {
+	config := Configuracion{
 		IPPermitida:      "*",
 		Puerto:           "2306",
 		IntentosFallidos: 3,
 	}
 
-	escaner := bufio.NewScanner(archivo)
-	for escaner.Scan() {
-		linea := strings.TrimSpace(escaner.Text())
+	datos, err := os.ReadFile(ruta)
+	if err != nil {
+		return config, err
+	}
+
+	lineas := strings.Split(string(datos), "\n")
+	for _, linea := range lineas {
+		linea = strings.TrimSpace(linea)
 		if linea == "" || strings.HasPrefix(linea, "#") {
 			continue
 		}
@@ -233,38 +210,38 @@ func cargarConfiguracion(ruta string) (*Configuracion, error) {
 		case "puerto":
 			config.Puerto = valor
 		case "intentos_fallidos":
-			if n, err := strconv.Atoi(valor); err == nil {
+			if n, err := strconv.Atoi(valor); err == nil && n > 0 {
 				config.IntentosFallidos = n
 			}
 		case "usuarios_permitidos":
-			lista := strings.Split(valor, ",")
-			for _, u := range lista {
-				config.UsuariosPermitidos = append(config.UsuariosPermitidos, strings.TrimSpace(u))
+			for _, u := range strings.Split(valor, ",") {
+				u = strings.TrimSpace(u)
+				if u != "" {
+					config.UsuariosPermitidos = append(config.UsuariosPermitidos, u)
+				}
 			}
 		}
 	}
 	return config, nil
 }
 
-func validarCredenciales(usuario, password string) bool {
-	archivo, err := os.Open("usuarios.db")
+func validarUsuario(usuario, password string) bool {
+	datos, err := os.ReadFile("usuarios.db")
 	if err != nil {
 		return false
 	}
-	defer archivo.Close()
 
-	hashBytes := sha256.Sum256([]byte(password))
-	hashHex := hex.EncodeToString(hashBytes[:])
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(password)))
 
-	escaner := bufio.NewScanner(archivo)
-	for escaner.Scan() {
-		linea := strings.TrimSpace(escaner.Text())
+	lineas := strings.Split(string(datos), "\n")
+	for _, linea := range lineas {
+		linea = strings.TrimSpace(linea)
 		if linea == "" || strings.HasPrefix(linea, "#") {
 			continue
 		}
 		partes := strings.Split(linea, ":")
 		if len(partes) >= 2 && partes[0] == usuario {
-			return partes[1] == hashHex
+			return partes[1] == hash
 		}
 	}
 	return false
@@ -282,7 +259,7 @@ func usuarioPermitido(usuario string, permitidos []string) bool {
 	return false
 }
 
-func obtenerMetricasLinux() (string, float64, float64, float64) {
+func obtenerReporte() (string, float64, float64, float64) {
 	textoCPU, pctCPU := leerCPU()
 	textoRAM, pctRAM := leerRAM()
 	procesos := contarProcesos()
@@ -298,23 +275,21 @@ func leerCPU() (string, float64) {
 		return "N/D", 0
 	}
 	lineas := strings.Split(string(datos), "\n")
-	if len(lineas) == 0 {
-		return "N/D", 0
-	}
 	campos := strings.Fields(lineas[0])
 	if len(campos) < 5 || campos[0] != "cpu" {
 		return "N/D", 0
 	}
 
-	var total uint64
+	total := 0
 	for _, valor := range campos[1:] {
-		n, _ := strconv.ParseUint(valor, 10, 64)
+		n, _ := strconv.Atoi(valor)
 		total += n
 	}
-	inactivo, _ := strconv.ParseUint(campos[4], 10, 64)
+	inactivo, _ := strconv.Atoi(campos[4])
 	if total == 0 {
 		return "0%", 0
 	}
+
 	porcentaje := float64(total-inactivo) * 100.0 / float64(total)
 	return fmt.Sprintf("%.0f%%", porcentaje), porcentaje
 }
@@ -324,23 +299,23 @@ func leerRAM() (string, float64) {
 	if err != nil {
 		return "N/D", 0
 	}
-	var totalKB, disponibleKB uint64
+
+	var totalKB, disponibleKB int
 	for _, linea := range strings.Split(string(datos), "\n") {
-		if strings.HasPrefix(linea, "MemTotal:") {
-			campos := strings.Fields(linea)
-			if len(campos) >= 2 {
-				totalKB, _ = strconv.ParseUint(campos[1], 10, 64)
-			}
-		} else if strings.HasPrefix(linea, "MemAvailable:") {
-			campos := strings.Fields(linea)
-			if len(campos) >= 2 {
-				disponibleKB, _ = strconv.ParseUint(campos[1], 10, 64)
-			}
+		campos := strings.Fields(linea)
+		if len(campos) < 2 {
+			continue
+		}
+		if campos[0] == "MemTotal:" {
+			totalKB, _ = strconv.Atoi(campos[1])
+		} else if campos[0] == "MemAvailable:" {
+			disponibleKB, _ = strconv.Atoi(campos[1])
 		}
 	}
 	if totalKB == 0 {
 		return "N/D", 0
 	}
+
 	usadaMB := (totalKB - disponibleKB) / 1024
 	totalMB := totalKB / 1024
 	porcentaje := float64(totalKB-disponibleKB) * 100.0 / float64(totalKB)
@@ -352,6 +327,7 @@ func contarProcesos() int {
 	if err != nil {
 		return 0
 	}
+
 	conteo := 0
 	for _, entrada := range entradas {
 		if entrada.IsDir() {
@@ -364,22 +340,26 @@ func contarProcesos() int {
 }
 
 func leerDisco() (string, float64) {
-	salida, err := exec.Command("df", "-h", "/").CombinedOutput()
+	salida, err := exec.Command("df", "/").CombinedOutput()
 	if err != nil {
 		return "N/D", 0
 	}
+
 	lineas := strings.Split(strings.TrimSpace(string(salida)), "\n")
-	if len(lineas) >= 2 {
-		campos := strings.Fields(lineas[1])
-		if len(campos) >= 5 {
-			textoPorcentaje := campos[4]
-			sinSigno := strings.TrimSuffix(textoPorcentaje, "%")
-			valor, err := strconv.ParseFloat(sinSigno, 64)
-			if err != nil {
-				valor = 0
-			}
-			return textoPorcentaje, valor
-		}
+	if len(lineas) < 2 {
+		return "N/D", 0
 	}
-	return "N/D", 0
+
+	campos := strings.Fields(lineas[1])
+	if len(campos) < 5 {
+		return "N/D", 0
+	}
+
+	textoPorcentaje := campos[4]
+	sinSigno := strings.TrimSuffix(textoPorcentaje, "%")
+	valor, err := strconv.Atoi(sinSigno)
+	if err != nil {
+		return textoPorcentaje, 0
+	}
+	return textoPorcentaje, float64(valor)
 }

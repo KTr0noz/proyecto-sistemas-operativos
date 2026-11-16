@@ -51,28 +51,28 @@ func main() {
 	}
 	defer conexion.Close()
 
-	codificador := json.NewEncoder(conexion)
-	decodificador := json.NewDecoder(conexion)
+	enviador := json.NewEncoder(conexion)
+	lector := json.NewDecoder(conexion)
 
 	fmt.Println("==================================================")
 	fmt.Println("          CLIENTE SISTEMAS OPERATIVOS             ")
 	fmt.Printf("Conectado a %s:%s | Periodo de reporte: %ds\n", ip, puerto, periodo)
 	fmt.Println("==================================================")
 
-	if !autenticarEnConsola(codificador, decodificador, periodo) {
+	if !autenticar(enviador, lector, periodo) {
 		return
 	}
 
 	fmt.Println("\n[+] LOGIN EXITOSO. Abriendo ventana OperGUI...")
-	iniciarVentanaOperGUI(codificador, decodificador)
+	iniciarGUI(enviador, lector)
 }
 
-func autenticarEnConsola(codificador *json.Encoder, decodificador *json.Decoder, periodo int) bool {
-	lector := bufio.NewReader(os.Stdin)
+func autenticar(enviador *json.Encoder, lector *json.Decoder, periodo int) bool {
+	entrada := bufio.NewReader(os.Stdin)
 
 	for {
 		fmt.Print("Usuario: ")
-		usuario, _ := lector.ReadString('\n')
+		usuario, _ := entrada.ReadString('\n')
 		usuario = strings.TrimSpace(usuario)
 
 		fmt.Print("Password: ")
@@ -83,7 +83,7 @@ func autenticarEnConsola(codificador *json.Encoder, decodificador *json.Decoder,
 			return false
 		}
 
-		err = codificador.Encode(Mensaje{
+		err = enviador.Encode(Mensaje{
 			Tipo:     "auth",
 			Usuario:  usuario,
 			Password: string(passwordBytes),
@@ -95,7 +95,7 @@ func autenticarEnConsola(codificador *json.Encoder, decodificador *json.Decoder,
 		}
 
 		var respuesta Mensaje
-		if err := decodificador.Decode(&respuesta); err != nil {
+		if err := lector.Decode(&respuesta); err != nil {
 			fmt.Println("Conexion terminada por el servidor.")
 			return false
 		}
@@ -113,18 +113,18 @@ func autenticarEnConsola(codificador *json.Encoder, decodificador *json.Decoder,
 	}
 }
 
-func iniciarVentanaOperGUI(codificador *json.Encoder, decodificador *json.Decoder) {
-	aplicacion := app.New()
-	ventana := aplicacion.NewWindow("Proyecto Operativos - Ramos")
+func iniciarGUI(enviador *json.Encoder, lector *json.Decoder) {
+	programa := app.New()
+	ventana := programa.NewWindow("Proyecto Operativos - Ramos")
 
 	cajaComando := widget.NewEntry()
 	cajaComando.SetPlaceHolder("Digite el comando UNIX (o 'bye' para salir)")
 
-	etiquetaResultado := widget.NewLabel("Esperando comando...")
-	contenedorResultado := container.NewScroll(etiquetaResultado)
-	contenedorResultado.SetMinSize(fyne.NewSize(500, 180))
+	textoSalida := widget.NewLabel("Esperando comando...")
+	panelSalida := container.NewScroll(textoSalida)
+	panelSalida.SetMinSize(fyne.NewSize(500, 180))
 
-	etiquetaReporte := widget.NewLabel("Esperando reporte de recursos...")
+	textoReporte := widget.NewLabel("Esperando reporte de recursos...")
 
 	barraCPU := widget.NewProgressBar()
 	barraCPU.Max = 100
@@ -135,14 +135,14 @@ func iniciarVentanaOperGUI(codificador *json.Encoder, decodificador *json.Decode
 	barraDisco := widget.NewProgressBar()
 	barraDisco.Max = 100
 
-	ejecutarComando := func(texto string) {
+	enviarComando := func(texto string) {
 		comando := strings.TrimSpace(texto)
 		if comando == "" {
 			return
 		}
 
-		if err := codificador.Encode(Mensaje{Tipo: "comando", Contenido: comando}); err != nil {
-			etiquetaResultado.SetText("Error enviando comando al servidor.")
+		if err := enviador.Encode(Mensaje{Tipo: "comando", Contenido: comando}); err != nil {
+			textoSalida.SetText("Error enviando comando al servidor.")
 			return
 		}
 
@@ -154,17 +154,17 @@ func iniciarVentanaOperGUI(codificador *json.Encoder, decodificador *json.Decode
 	}
 
 	botonEjecutar := widget.NewButton("Ejecutar", func() {
-		ejecutarComando(cajaComando.Text)
+		enviarComando(cajaComando.Text)
 	})
-	cajaComando.OnSubmitted = ejecutarComando
+	cajaComando.OnSubmitted = enviarComando
 
 	ventana.SetContent(container.NewVBox(
 		cajaComando,
 		botonEjecutar,
 		widget.NewLabel("Salida del comando:"),
-		contenedorResultado,
+		panelSalida,
 		widget.NewSeparator(),
-		etiquetaReporte,
+		textoReporte,
 		widget.NewLabel("CPU (%):"),
 		barraCPU,
 		widget.NewLabel("RAM (%):"),
@@ -175,11 +175,11 @@ func iniciarVentanaOperGUI(codificador *json.Encoder, decodificador *json.Decode
 
 	ventana.Resize(fyne.NewSize(560, 460))
 
-	go recibirReportesYRespuestas(
-		decodificador,
+	go recibirMensajes(
+		lector,
 		ventana,
-		etiquetaResultado,
-		etiquetaReporte,
+		textoSalida,
+		textoReporte,
 		barraCPU,
 		barraRAM,
 		barraDisco,
@@ -188,20 +188,20 @@ func iniciarVentanaOperGUI(codificador *json.Encoder, decodificador *json.Decode
 	ventana.ShowAndRun()
 }
 
-func recibirReportesYRespuestas(
-	decodificador *json.Decoder,
+func recibirMensajes(
+	lector *json.Decoder,
 	ventana fyne.Window,
-	etiquetaResultado *widget.Label,
-	etiquetaReporte *widget.Label,
+	textoSalida *widget.Label,
+	textoReporte *widget.Label,
 	barraCPU *widget.ProgressBar,
 	barraRAM *widget.ProgressBar,
 	barraDisco *widget.ProgressBar,
 ) {
 	for {
 		var mensaje Mensaje
-		if err := decodificador.Decode(&mensaje); err != nil {
+		if err := lector.Decode(&mensaje); err != nil {
 			fyne.Do(func() {
-				etiquetaReporte.SetText("Conexion cerrada por el servidor.")
+				textoReporte.SetText("Conexion cerrada por el servidor.")
 			})
 			return
 		}
@@ -209,7 +209,7 @@ func recibirReportesYRespuestas(
 		switch mensaje.Tipo {
 		case "reporte":
 			fyne.Do(func() {
-				etiquetaReporte.SetText(mensaje.Contenido)
+				textoReporte.SetText(mensaje.Contenido)
 				barraCPU.SetValue(mensaje.PorcentajeCPU)
 				barraRAM.SetValue(mensaje.PorcentajeRAM)
 				barraDisco.SetValue(mensaje.PorcentajeDisco)
@@ -220,7 +220,7 @@ func recibirReportesYRespuestas(
 				salida = "(comando ejecutado sin salida)"
 			}
 			fyne.Do(func() {
-				etiquetaResultado.SetText(salida)
+				textoSalida.SetText(salida)
 			})
 		case "bye":
 			fyne.Do(func() {
