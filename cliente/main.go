@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,7 +13,6 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
-	"golang.org/x/term"
 )
 
 type Mensaje struct {
@@ -30,91 +28,166 @@ type Mensaje struct {
 }
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Println("Uso: clienteOperativos <IP> <Puerto> <PeriodoReporte>")
-		fmt.Println("Ejemplo: clienteOperativos 127.0.0.1 2306 5")
-		return
-	}
-
-	ip := os.Args[1]
-	puerto := os.Args[2]
-	periodo, err := strconv.Atoi(os.Args[3])
-	if err != nil || periodo <= 0 {
-		fmt.Println("Error: PeriodoReporte debe ser un numero entero positivo mayor a 0.")
-		return
-	}
-
-	conexion, err := net.Dial("tcp", ip+":"+puerto)
-	if err != nil {
-		fmt.Printf("Error conectando a %s:%s -> %v\n", ip, puerto, err)
-		return
-	}
-	defer conexion.Close()
-
-	enviador := json.NewEncoder(conexion)
-	lector := json.NewDecoder(conexion)
-
-	fmt.Println("==================================================")
-	fmt.Println("          CLIENTE SISTEMAS OPERATIVOS             ")
-	fmt.Printf("Conectado a %s:%s | Periodo de reporte: %ds\n", ip, puerto, periodo)
-	fmt.Println("==================================================")
-
-	if !autenticar(enviador, lector, periodo) {
-		return
-	}
-
-	fmt.Println("\n[+] LOGIN EXITOSO. Abriendo ventana OperGUI...")
-	iniciarGUI(enviador, lector)
-}
-
-func autenticar(enviador *json.Encoder, lector *json.Decoder, periodo int) bool {
-	entrada := bufio.NewReader(os.Stdin)
-
-	for {
-		fmt.Print("Usuario: ")
-		usuario, _ := entrada.ReadString('\n')
-		usuario = strings.TrimSpace(usuario)
-
-		fmt.Print("Password: ")
-		passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Println()
-		if err != nil {
-			fmt.Printf("Error leyendo password: %v\n", err)
-			return false
-		}
-
-		err = enviador.Encode(Mensaje{
-			Tipo:     "auth",
-			Usuario:  usuario,
-			Password: string(passwordBytes),
-			Periodo:  periodo,
-		})
-		if err != nil {
-			fmt.Println("Error enviando credenciales al servidor.")
-			return false
-		}
-
-		var respuesta Mensaje
-		if err := lector.Decode(&respuesta); err != nil {
-			fmt.Println("Conexion terminada por el servidor.")
-			return false
-		}
-
-		if respuesta.Tipo == "auth_ok" {
-			return true
-		}
-
-		fmt.Printf("[-] %s\n", respuesta.Contenido)
-		if respuesta.IntentosRestantes <= 0 {
-			fmt.Println("Acceso bloqueado. Terminando conexion.")
-			return false
-		}
-		fmt.Printf("Reintentos disponibles: %d\n\n", respuesta.IntentosRestantes)
-	}
-}
-
-func iniciarGUI(enviador *json.Encoder, lector *json.Decoder) {
 	programa := app.New()
+	pedirParametros(programa)
+	programa.Run()
+}
+
+// Ventana 1: pide IP, puerto y periodo de reporte, y se conecta al servidor.
+func pedirParametros(programa fyne.App) {
+	ventana := programa.NewWindow("Proyecto Operativos - Conexion")
+
+	cajaIP := widget.NewEntry()
+	cajaIP.SetPlaceHolder("Ejemplo: 127.0.0.1")
+
+	cajaPuerto := widget.NewEntry()
+	cajaPuerto.SetPlaceHolder("Ejemplo: 2306")
+
+	cajaPeriodo := widget.NewEntry()
+	cajaPeriodo.SetPlaceHolder("Ejemplo: 5")
+
+	// Si se ejecuta como: clienteOperativos <IP> <Puerto> <PeriodoReporte>, se llenan los campos.
+	if len(os.Args) == 4 {
+		cajaIP.SetText(os.Args[1])
+		cajaPuerto.SetText(os.Args[2])
+		cajaPeriodo.SetText(os.Args[3])
+	}
+
+	textoEstado := widget.NewLabel("")
+	textoEstado.Wrapping = fyne.TextWrapWord
+
+	botonConectar := widget.NewButton("Conectar", nil)
+	botonConectar.OnTapped = func() {
+		if botonConectar.Disabled() {
+			return
+		}
+
+		ip := strings.TrimSpace(cajaIP.Text)
+		puerto := strings.TrimSpace(cajaPuerto.Text)
+		periodo, err := strconv.Atoi(strings.TrimSpace(cajaPeriodo.Text))
+		if err != nil || periodo <= 0 {
+			textoEstado.SetText("Error: PeriodoReporte debe ser un numero entero positivo mayor a 0.")
+			return
+		}
+
+		botonConectar.Disable()
+		textoEstado.SetText("Conectando a " + ip + ":" + puerto + "...")
+
+		// La conexion se hace en una goroutine para que la ventana no se congele.
+		go func() {
+			conexion, err := net.DialTimeout("tcp", ip+":"+puerto, 5*time.Second)
+			fyne.Do(func() {
+				if err != nil {
+					textoEstado.SetText(fmt.Sprintf("Error conectando a %s:%s -> %v", ip, puerto, err))
+					botonConectar.Enable()
+					return
+				}
+				pedirLogin(programa, json.NewEncoder(conexion), json.NewDecoder(conexion), periodo)
+				ventana.Close()
+			})
+		}()
+	}
+	cajaPeriodo.OnSubmitted = func(string) { botonConectar.OnTapped() }
+
+	ventana.SetContent(container.NewVBox(
+		widget.NewLabel("IP del servidor:"),
+		cajaIP,
+		widget.NewLabel("Puerto:"),
+		cajaPuerto,
+		widget.NewLabel("Periodo de reporte (segundos):"),
+		cajaPeriodo,
+		botonConectar,
+		textoEstado,
+	))
+
+	ventana.Resize(fyne.NewSize(400, 0))
+	ventana.Show()
+}
+
+// Ventana 2: pide usuario y contrasena y los valida con el servidor.
+func pedirLogin(programa fyne.App, enviador *json.Encoder, lector *json.Decoder, periodo int) {
+	ventana := programa.NewWindow("Proyecto Operativos - Login")
+
+	cajaUsuario := widget.NewEntry()
+	cajaUsuario.SetPlaceHolder("Usuario")
+
+	cajaPassword := widget.NewPasswordEntry()
+	cajaPassword.SetPlaceHolder("Contrasena")
+
+	textoEstado := widget.NewLabel("")
+	textoEstado.Wrapping = fyne.TextWrapWord
+
+	botonIngresar := widget.NewButton("Ingresar", nil)
+	botonIngresar.OnTapped = func() {
+		if botonIngresar.Disabled() {
+			return
+		}
+
+		usuario := strings.TrimSpace(cajaUsuario.Text)
+		password := cajaPassword.Text
+		botonIngresar.Disable()
+
+		// La espera de la respuesta del servidor tambien va en una goroutine.
+		go func() {
+			respuesta, err := autenticar(enviador, lector, usuario, password, periodo)
+			fyne.Do(func() {
+				if err != nil {
+					textoEstado.SetText("Conexion terminada por el servidor.")
+					return
+				}
+
+				if respuesta.Tipo == "auth_ok" {
+					iniciarGUI(programa, enviador, lector)
+					ventana.Close()
+					return
+				}
+
+				if respuesta.IntentosRestantes <= 0 {
+					textoEstado.SetText(respuesta.Contenido + "\nAcceso bloqueado. Terminando conexion.")
+					return
+				}
+
+				textoEstado.SetText(fmt.Sprintf("%s\nReintentos disponibles: %d", respuesta.Contenido, respuesta.IntentosRestantes))
+				cajaPassword.SetText("")
+				botonIngresar.Enable()
+			})
+		}()
+	}
+	cajaPassword.OnSubmitted = func(string) { botonIngresar.OnTapped() }
+
+	ventana.SetContent(container.NewVBox(
+		widget.NewLabel("Usuario:"),
+		cajaUsuario,
+		widget.NewLabel("Contrasena:"),
+		cajaPassword,
+		botonIngresar,
+		textoEstado,
+	))
+
+	ventana.Resize(fyne.NewSize(400, 0))
+	ventana.Show()
+}
+
+// Envia las credenciales al servidor y devuelve su respuesta (auth_ok o auth_error).
+func autenticar(enviador *json.Encoder, lector *json.Decoder, usuario, password string, periodo int) (Mensaje, error) {
+	var respuesta Mensaje
+
+	err := enviador.Encode(Mensaje{
+		Tipo:     "auth",
+		Usuario:  usuario,
+		Password: password,
+		Periodo:  periodo,
+	})
+	if err != nil {
+		return respuesta, err
+	}
+
+	err = lector.Decode(&respuesta)
+	return respuesta, err
+}
+
+// Ventana 3: la ventana principal OperGUI (comandos + reportes con 3 barras).
+func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder) {
 	ventana := programa.NewWindow("Proyecto Operativos - Ramos")
 
 	cajaComando := widget.NewEntry()
@@ -185,7 +258,7 @@ func iniciarGUI(enviador *json.Encoder, lector *json.Decoder) {
 		barraDisco,
 	)
 
-	ventana.ShowAndRun()
+	ventana.Show()
 }
 
 func recibirMensajes(

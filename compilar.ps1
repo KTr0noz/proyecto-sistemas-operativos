@@ -23,7 +23,8 @@ $ud = [IO.File]::ReadAllText("$PWD\dist\linux-amd64\usuarios.db") -replace "`r`n
 
 Write-Host '==> Compilando Cliente OperGUI (Fyne) para Windows (amd64)...'
 $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '1'
-go build @flags -o dist\windows-amd64\clienteOperativos.exe .\cliente
+# -H=windowsgui: app grafica normal de Windows (no abre consola)
+go build -trimpath -ldflags '-s -w -H=windowsgui' -o dist\windows-amd64\clienteOperativos.exe .\cliente
 if ($LASTEXITCODE -ne 0) { throw 'Error compilando clienteOperativos.exe para Windows' }
 
 Write-Host '==> Compilando Servidor de prueba para Windows (amd64)...'

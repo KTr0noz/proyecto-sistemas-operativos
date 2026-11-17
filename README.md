@@ -13,12 +13,12 @@ Proyecto/
 │   ├── servidor.conf      # Archivo plano de configuracion (IP, puerto, intentos, usuarios permitidos)
 │   └── usuarios.db        # Base de datos plana (usuario:hash_sha256)
 ├── cliente/
-│   └── main.go            # Cliente Windows: login oculto en consola + ventana OperGUI (3 barras)
+│   └── main.go            # Cliente Windows (app grafica): ventana de conexion -> login -> OperGUI (3 barras)
 ├── dist/                  # Binarios compilados listos para ejecutar
 │   ├── linux-amd64/       # servidorOperativos (ELF estatico x86_64)
 │   └── windows-amd64/     # clienteOperativos.exe (Windows GUI con Fyne)
 ├── compilar.ps1           # Script de compilacion en Windows (PowerShell)
-├── compilar.sh            # Script de compilacion del servidor en Linux/WSL (sh)
+├── compilar.sh            # Script de compilacion en Linux: servidor + cliente Windows (sh, requiere mingw-w64)
 └── README.md
 ```
 
@@ -46,13 +46,15 @@ chmod +x servidorOperativos
 ```
 
 ### Paso 2: Conectar el Cliente desde Windows
+Abre `dist\windows-amd64\clienteOperativos.exe` con doble clic (es una app grafica, no abre consola). Tambien se puede lanzar con los parametros para que la primera ventana aparezca ya llena:
 ```powershell
 cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\Proyecto\dist\windows-amd64"
 .\clienteOperativos.exe 127.0.0.1 2306 5
 ```
 
-1. En la consola, ingresa usuario (`admin`) y contraseña (`linux`, sin eco en pantalla).
-2. Al autenticarse correctamente, se abrirá la ventana **OperGUI (`Proyecto Operativos - Ramos`)**:
+1. **Ventana de conexion (`Proyecto Operativos - Conexion`):** escribe la IP del servidor, el puerto (`2306`) y el periodo de reporte en segundos, y presiona **Conectar** (o `Enter`).
+2. **Ventana de login (`Proyecto Operativos - Login`):** al conectar, la ventana anterior se cierra. Ingresa usuario (`admin`) y contraseña (`linux`, oculta) y presiona **Ingresar** (o `Enter`).
+3. Al autenticarse correctamente, se abrirá la ventana **OperGUI (`Proyecto Operativos - Ramos`)**:
    * **Comandos UNIX:** Escribe comandos como `uname -a`, `ls -la`, `ps aux` en la caja de texto y presiona **Ejecutar** (o `Enter`). La salida aparece en el panel con desplazamiento sin mezclarse con los reportes.
    * **Monitoreo en paralelo:** Cada $n$ segundos se actualiza el texto de `Reporte #N` y las **3 barras de progreso** en tiempo real (**CPU**, **RAM** y **Disco**).
    * **Salir:** Escribe `bye` y presiona **Ejecutar** (o cierra la ventana).
@@ -69,7 +71,8 @@ cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\
    * Bucle principal en `atenderCliente`: atiende comandos remotos ejecutando `bash -c <comando>` y cierra sesión al recibir `bye`.
 
 ### Cliente (`cliente/main.go`)
-1. Valida los 3 argumentos de línea de comandos (`<IP> <Puerto> <PeriodoReporte>`).
-2. `autenticar(...)`: Pide usuario y clave oculta (`term.ReadPassword`).
+1. `pedirParametros(...)`: Ventana de conexion con IP, puerto y periodo (se llenan solos si se pasan `<IP> <Puerto> <PeriodoReporte>` al ejecutar). Al presionar **Conectar** valida el periodo y abre el socket con `net.DialTimeout` dentro de una goroutine, para que la ventana no se congele.
+2. `pedirLogin(...)`: Ventana de login con usuario y contraseña (`widget.NewPasswordEntry`). `autenticar(...)` envia las credenciales y espera la respuesta del servidor, tambien en una goroutine.
+   * Cada goroutine vuelve al hilo de la GUI con `fyne.Do(...)` para cambiar de ventana: primero abre la nueva y luego cierra la anterior, porque Fyne termina la app cuando no queda ninguna ventana abierta.
 3. `iniciarGUI(...)`: Construye la ventana Fyne con caja de comandos, botón `Ejecutar`, panel de salida y 3 barras (`barraCPU`, `barraRAM`, `barraDisco`).
 4. `recibirMensajes(...)`: Goroutine en segundo plano que actualiza la interfaz mediante `fyne.Do(...)` cada vez que llega un reporte o una salida de comando.
