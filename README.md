@@ -17,6 +17,7 @@ Proyecto/
 ├── dist/                  # Binarios compilados listos para ejecutar
 │   ├── linux-amd64/       # servidorOperativos (ELF estatico x86_64)
 │   └── windows-amd64/     # clienteOperativos.exe (Windows GUI con Fyne)
+├── CORRECCIONES.md        # Errores corregidos: codigo antes vs despues y pruebas
 ├── compilar.ps1           # Script de compilacion en Windows (PowerShell)
 ├── compilar.sh            # Script de compilacion en Linux: servidor + cliente Windows (sh, requiere mingw-w64)
 └── README.md
@@ -52,7 +53,7 @@ cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\
 .\clienteOperativos.exe 127.0.0.1 2306 5
 ```
 
-1. **Ventana de conexion (`Proyecto Operativos - Conexion`):** escribe la IP del servidor, el puerto (`2306`) y el periodo de reporte en segundos, y presiona **Conectar** (o `Enter`).
+1. **Ventana de conexion (`Proyecto Operativos - Conexion`):** escribe la IP del servidor, el puerto (`2306`) y el periodo de reporte en segundos (de 1 a 3600), y presiona **Conectar** (o `Enter`).
 2. **Ventana de login (`Proyecto Operativos - Login`):** al conectar, la ventana anterior se cierra. Ingresa usuario (`admin`) y contraseña (`linux`, oculta) y presiona **Ingresar** (o `Enter`).
 3. Al autenticarse correctamente, se abrirá la ventana **OperGUI (`Proyecto Operativos - Ramos`)**:
    * **Comandos UNIX:** Escribe comandos como `uname -a`, `ls -la`, `ps aux` en la caja de texto y presiona **Ejecutar** (o `Enter`). La salida aparece en el panel con desplazamiento sin mezclarse con los reportes.
@@ -67,8 +68,8 @@ cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\
 1. `leerConfiguracion("servidor.conf")`: Carga IP permitida, puerto, intentos fallidos y usuarios autorizados.
 2. `autenticar(...)`: Valida usuario y compara el hash `sha256.Sum256` contra `usuarios.db` mediante `validarUsuario` y `usuarioPermitido`.
 3. **Paralelismo:**
-   * Goroutine periódica `enviarReportes`: lee `/proc/stat` (`leerCPU`), `/proc/meminfo` (`leerRAM`), procesos en `/proc` (`contarProcesos`) y `df /` (`leerDisco`) cada $n$ segundos, enviando el resumen y los porcentajes numéricos.
-   * Bucle principal en `atenderCliente`: atiende comandos remotos ejecutando `bash -c <comando>` y cierra sesión al recibir `bye`.
+   * Goroutine periódica `enviarReportes`: lee `/proc/stat` (`leerCPU`, con dos muestras separadas 0,5 s), `/proc/meminfo` (`leerRAM`), procesos en `/proc` (`contarProcesos`) y `df /` (`leerDisco`) cada $n$ segundos, enviando el resumen y los porcentajes numéricos.
+   * Bucle principal en `atenderCliente`: atiende comandos remotos ejecutando `bash -c <comando>` (máximo 10 segundos y 64 KB de salida) y cierra sesión al recibir `bye`.
 
 ### Cliente (`cliente/main.go`)
 1. `pedirParametros(...)`: Ventana de conexion con IP, puerto y periodo (se llenan solos si se pasan `<IP> <Puerto> <PeriodoReporte>` al ejecutar). Al presionar **Conectar** valida el periodo y abre el socket con `net.DialTimeout` dentro de una goroutine, para que la ventana no se congele.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -55,6 +56,7 @@ func main() {
 		conexion, err := oyente.Accept()
 		if err != nil {
 			fmt.Printf("Error aceptando conexion: %v\n", err)
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		go atenderCliente(conexion, config)
@@ -102,9 +104,19 @@ func atenderCliente(conexion net.Conn, config Configuracion) {
 		}
 
 		fmt.Printf("[*] Ejecutando comando de '%s': %s\n", usuario, comando)
-		salida, err := exec.Command("bash", "-c", comando).CombinedOutput()
-		if err != nil && len(salida) == 0 {
+		ctx, cancelar := context.WithTimeout(context.Background(), 10*time.Second)
+		comandoBash := exec.CommandContext(ctx, "bash", "-c", comando)
+		comandoBash.WaitDelay = time.Second
+		salida, err := comandoBash.CombinedOutput()
+		cancelar()
+
+		if ctx.Err() == context.DeadlineExceeded {
+			salida = append(salida, "\n[Comando detenido: supero el tiempo limite de 10 segundos]\n"...)
+		} else if err != nil && len(salida) == 0 {
 			salida = []byte(fmt.Sprintf("Error ejecutando: %v\n", err))
+		}
+		if len(salida) > 64*1024 {
+			salida = append(salida[:64*1024], "\n[Salida recortada a 64 KB]\n"...)
 		}
 
 		if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: string(salida)}); err != nil {
@@ -129,7 +141,7 @@ func autenticar(conexion net.Conn, lector *json.Decoder, config Configuracion, i
 
 		if validarUsuario(mensaje.Usuario, mensaje.Password) && usuarioPermitido(mensaje.Usuario, config.UsuariosPermitidos) {
 			periodo := mensaje.Periodo
-			if periodo <= 0 {
+			if periodo <= 0 || periodo > 3600 {
 				periodo = 5
 			}
 			enviar(conexion, Mensaje{Tipo: "auth_ok", Contenido: "Autenticacion exitosa"})
@@ -269,15 +281,28 @@ func obtenerReporte() (string, float64, float64, float64) {
 	return resumen, pctCPU, pctRAM, pctDisco
 }
 
+// /proc/stat acumula tiempos desde que arranco el equipo: se toman dos muestras y se restan.
 func leerCPU() (string, float64) {
+	total1, inactivo1 := leerTiemposCPU()
+	time.Sleep(500 * time.Millisecond)
+	total2, inactivo2 := leerTiemposCPU()
+	if total2 == total1 {
+		return "N/D", 0
+	}
+
+	porcentaje := float64((total2-total1)-(inactivo2-inactivo1)) * 100.0 / float64(total2-total1)
+	return fmt.Sprintf("%.0f%%", porcentaje), porcentaje
+}
+
+func leerTiemposCPU() (int, int) {
 	datos, err := os.ReadFile("/proc/stat")
 	if err != nil {
-		return "N/D", 0
+		return 0, 0
 	}
 	lineas := strings.Split(string(datos), "\n")
 	campos := strings.Fields(lineas[0])
 	if len(campos) < 5 || campos[0] != "cpu" {
-		return "N/D", 0
+		return 0, 0
 	}
 
 	total := 0
@@ -286,12 +311,7 @@ func leerCPU() (string, float64) {
 		total += n
 	}
 	inactivo, _ := strconv.Atoi(campos[4])
-	if total == 0 {
-		return "0%", 0
-	}
-
-	porcentaje := float64(total-inactivo) * 100.0 / float64(total)
-	return fmt.Sprintf("%.0f%%", porcentaje), porcentaje
+	return total, inactivo
 }
 
 func leerRAM() (string, float64) {

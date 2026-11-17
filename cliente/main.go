@@ -65,8 +65,8 @@ func pedirParametros(programa fyne.App) {
 		ip := strings.TrimSpace(cajaIP.Text)
 		puerto := strings.TrimSpace(cajaPuerto.Text)
 		periodo, err := strconv.Atoi(strings.TrimSpace(cajaPeriodo.Text))
-		if err != nil || periodo <= 0 {
-			textoEstado.SetText("Error: PeriodoReporte debe ser un numero entero positivo mayor a 0.")
+		if err != nil || periodo <= 0 || periodo > 3600 {
+			textoEstado.SetText("Error: PeriodoReporte debe ser un numero entero entre 1 y 3600.")
 			return
 		}
 
@@ -220,10 +220,6 @@ func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder)
 		}
 
 		cajaComando.SetText("")
-		if strings.EqualFold(comando, "bye") {
-			time.Sleep(300 * time.Millisecond)
-			ventana.Close()
-		}
 	}
 
 	botonEjecutar := widget.NewButton("Ejecutar", func() {
