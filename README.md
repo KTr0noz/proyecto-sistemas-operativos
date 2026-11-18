@@ -56,7 +56,7 @@ cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\
 1. **Ventana de conexion (`Proyecto Operativos - Conexion`):** escribe la IP del servidor, el puerto (`2306`) y el periodo de reporte en segundos (de 1 a 3600), y presiona **Conectar** (o `Enter`).
 2. **Ventana de login (`Proyecto Operativos - Login`):** al conectar, la ventana anterior se cierra. Ingresa usuario (`admin`) y contraseña (`linux`, oculta) y presiona **Ingresar** (o `Enter`).
 3. Al autenticarse correctamente, se abrirá la ventana **OperGUI (`Proyecto Operativos - Ramos`)**:
-   * **Comandos UNIX:** Escribe comandos como `uname -a`, `ls -la`, `ps aux` en la caja de texto y presiona **Ejecutar** (o `Enter`). La salida aparece en el panel con desplazamiento sin mezclarse con los reportes.
+   * **Comandos UNIX:** Escribe comandos como `uname -a`, `ls -la`, `ps aux` en la caja de texto y presiona **Ejecutar** (o `Enter`). La salida aparece en el panel con desplazamiento sin mezclarse con los reportes. Un `cd` (por ejemplo `cd /tmp`) se mantiene para los comandos siguientes.
    * **Monitoreo en paralelo:** Cada $n$ segundos se actualiza el texto de `Reporte #N` y las **3 barras de progreso** en tiempo real (**CPU**, **RAM** y **Disco**).
    * **Salir:** Escribe `bye` y presiona **Ejecutar** (o cierra la ventana).
 
@@ -70,6 +70,7 @@ cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\
 3. **Paralelismo:**
    * Goroutine periódica `enviarReportes`: lee `/proc/stat` (`leerCPU`, con dos muestras separadas 0,5 s), `/proc/meminfo` (`leerRAM`), procesos en `/proc` (`contarProcesos`) y `df /` (`leerDisco`) cada $n$ segundos, enviando el resumen y los porcentajes numéricos.
    * Bucle principal en `atenderCliente`: atiende comandos remotos ejecutando `bash -c <comando>` (máximo 10 segundos y 64 KB de salida) y cierra sesión al recibir `bye`.
+   * Cada sesión guarda su carpeta actual en la variable `directorio`. Cada comando se ejecuta ahí y, al terminar, bash informa en qué carpeta quedó (`trap ... EXIT`), así un `cd` se mantiene entre comandos. Si se vence el tiempo, se mata el grupo de procesos completo (`Setpgid`), para no dejar procesos huérfanos.
 
 ### Cliente (`cliente/main.go`)
 1. `pedirParametros(...)`: Ventana de conexion con IP, puerto y periodo (se llenan solos si se pasan `<IP> <Puerto> <PeriodoReporte>` al ejecutar). Al presionar **Conectar** valida el periodo y abre el socket con `net.DialTimeout` dentro de una goroutine, para que la ventana no se congele.

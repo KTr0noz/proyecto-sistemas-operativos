@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -86,6 +87,11 @@ func atenderCliente(conexion net.Conn, config Configuracion) {
 
 	go enviarReportes(conexion, periodo)
 
+	// Carpeta donde se ejecutan los comandos de esta sesion. Empieza en la carpeta
+	// del servidor y cambia cuando el usuario hace cd.
+	carpetaInicial, _ := os.Getwd()
+	directorio := carpetaInicial
+
 	for {
 		var mensaje Mensaje
 		if err := lector.Decode(&mensaje); err != nil {
@@ -103,12 +109,32 @@ func atenderCliente(conexion net.Conn, config Configuracion) {
 			break
 		}
 
-		fmt.Printf("[*] Ejecutando comando de '%s': %s\n", usuario, comando)
+		// Si la carpeta guardada ya no existe (la borraron), se vuelve a la inicial.
+		if _, err := os.Stat(directorio); err != nil {
+			directorio = carpetaInicial
+		}
+
+		fmt.Printf("[*] Ejecutando comando de '%s' en %s: %s\n", usuario, directorio, comando)
 		ctx, cancelar := context.WithTimeout(context.Background(), 10*time.Second)
-		comandoBash := exec.CommandContext(ctx, "bash", "-c", comando)
+		// Al terminar, bash imprime la carpeta donde quedo (por si el comando hizo cd).
+		comandoBash := exec.CommandContext(ctx, "bash", "-c", `trap 'echo "__DIRECTORIO__$PWD"' EXIT; `+comando)
+		comandoBash.Dir = directorio
+		// bash y sus hijos van en un grupo de procesos propio: si se vence el tiempo
+		// se mata el grupo completo (pid negativo) y no quedan procesos huerfanos.
+		comandoBash.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		comandoBash.Cancel = func() error {
+			return syscall.Kill(-comandoBash.Process.Pid, syscall.SIGKILL)
+		}
 		comandoBash.WaitDelay = time.Second
 		salida, err := comandoBash.CombinedOutput()
 		cancelar()
+
+		// Se separa la carpeta (lo que va despues de la marca) del resto de la salida.
+		texto := string(salida)
+		if i := strings.LastIndex(texto, "__DIRECTORIO__"); i >= 0 {
+			directorio = strings.TrimSuffix(texto[i+len("__DIRECTORIO__"):], "\n")
+			salida = salida[:i]
+		}
 
 		if ctx.Err() == context.DeadlineExceeded {
 			salida = append(salida, "\n[Comando detenido: supero el tiempo limite de 10 segundos]\n"...)
