@@ -24,6 +24,7 @@ type Mensaje struct {
 	PorcentajeCPU     float64 `json:"porcentaje_cpu,omitempty"`
 	PorcentajeRAM     float64 `json:"porcentaje_ram,omitempty"`
 	PorcentajeDisco   float64 `json:"porcentaje_disco,omitempty"`
+	Directorio        string  `json:"directorio,omitempty"`
 }
 
 type Configuracion struct {
@@ -109,6 +110,14 @@ func atenderCliente(conexion net.Conn, config Configuracion) {
 			break
 		}
 
+		if !comandoPermitido(comando) {
+			fmt.Printf("[-] Comando no permitido de '%s': %s\n", usuario, comando)
+			if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: "comando no permitido", Directorio: directorio}); err != nil {
+				break
+			}
+			continue
+		}
+
 		// Si la carpeta guardada ya no existe (la borraron), se vuelve a la inicial.
 		if _, err := os.Stat(directorio); err != nil {
 			directorio = carpetaInicial
@@ -145,7 +154,7 @@ func atenderCliente(conexion net.Conn, config Configuracion) {
 			salida = append(salida[:64*1024], "\n[Salida recortada a 64 KB]\n"...)
 		}
 
-		if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: string(salida)}); err != nil {
+		if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: string(salida), Directorio: directorio}); err != nil {
 			break
 		}
 	}
@@ -170,7 +179,8 @@ func autenticar(conexion net.Conn, lector *json.Decoder, config Configuracion, i
 			if periodo <= 0 || periodo > 3600 {
 				periodo = 5
 			}
-			enviar(conexion, Mensaje{Tipo: "auth_ok", Contenido: "Autenticacion exitosa"})
+			carpeta, _ := os.Getwd()
+			enviar(conexion, Mensaje{Tipo: "auth_ok", Contenido: "Autenticacion exitosa", Directorio: carpeta})
 			fmt.Printf("[+] Usuario '%s' autenticado exitosamente desde %s\n", mensaje.Usuario, ipCliente)
 			return mensaje.Usuario, periodo, true
 		}
@@ -295,6 +305,28 @@ func usuarioPermitido(usuario string, permitidos []string) bool {
 		}
 	}
 	return false
+}
+
+// Comandos administrativos que no se permiten ejecutar desde el cliente.
+var comandosNoPermitidos = []string{
+	"su", "sudo", "passwd", "useradd", "userdel", "usermod",
+	"shutdown", "reboot", "poweroff", "systemctl", "kill",
+	"rm", "chmod", "chown", "dd", "mkfs", "fdisk", "mount", "umount",
+	"iptables",
+}
+
+// Revisa solo el comando base (la primera palabra), sin importar sus argumentos.
+func comandoPermitido(comando string) bool {
+	campos := strings.Fields(comando)
+	if len(campos) == 0 {
+		return true
+	}
+	for _, noPermitido := range comandosNoPermitidos {
+		if campos[0] == noPermitido {
+			return false
+		}
+	}
+	return true
 }
 
 func obtenerReporte() (string, float64, float64, float64) {

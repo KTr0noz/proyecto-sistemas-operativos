@@ -1,15 +1,19 @@
 # Correcciones de errores: antes vs después
 
-Este documento compara el código **antes** (con el error) y **después** (con la solución) de los errores corregidos, y resume las pruebas hechas al servidor y al cliente. Las correcciones se hicieron en dos rondas: primero los errores 1 a 5 y después el `cd` persistente (error 6).
+Este documento compara el código **antes** y **después** de cada cambio, y resume las pruebas hechas al servidor y al cliente. Los cambios se hicieron en tres rondas:
+1. Los errores 1 a 5.
+2. El `cd` persistente (error 6).
+3. La ubicación actual en la GUI (7) y la lista de comandos no permitidos (8).
 
 - **Antes:** la rama `old` (proyecto original) y el commit de la GUI de conexión/login, para el código del cliente.
 - **Después:** la rama `main` con las correcciones.
 - **Tamaño del cambio, ronda 1 (errores 1 a 5):** 2 archivos (`servidor/main.go` y `cliente/main.go`), +33 / −17 líneas, una sola función nueva (`leerTiemposCPU`) y un solo import nuevo (`context`). La estructura del programa no cambia.
 - **Tamaño del cambio, ronda 2 (error 6):** `servidor/main.go` +28 / −2 líneas, ningún archivo ni función nueva y un solo import nuevo (`syscall`). Además, `compilar.ps1` pierde 6 líneas: el servidor de prueba para Windows (ver sección 6). El cliente no cambia.
+- **Tamaño del cambio, ronda 3 (7 y 8):** `servidor/main.go` +34 / −2 y `cliente/main.go` +10 / −2. Hay una sola función nueva (`comandoPermitido`) y una lista (`comandosNoPermitidos`), y ningún import nuevo.
 
 ## Resumen
 
-| # | Error | Archivo | Antes (medido) | Después (medido) |
+| # | Cambio | Archivo | Antes (medido) | Después (medido) |
 |---|---|---|---|---|
 | 1 | CPU medida desde que arrancó el equipo | servidor | Con 4 núcleos al 100% reportaba **17.8%** | Reporta **100%** |
 | 2 | Comandos sin límite de tiempo ni de tamaño | servidor | `ping` dejaba la sesión **colgada para siempre**; una salida de 30 MB se enviaba **completa** | `ping` se detiene a los **10 s** con aviso; la salida se recorta a **64 KB** |
@@ -17,6 +21,8 @@ Este documento compara el código **antes** (con el error) y **después** (con l
 | 4 | Doble cierre de ventana con `bye` | cliente | La GUI se congelaba **300 ms** y la ventana se cerraba **2 veces** | **0 ms**; la ventana se cierra **1 vez**, cuando el servidor confirma |
 | 5 | `Accept` sin pausa cuando falla | servidor | Con los descriptores agotados: **99% de CPU** y **294 335 líneas de log por segundo** | **0% de CPU** y **10 líneas por segundo** |
 | 6 | `cd` no se mantenía entre comandos | servidor | `cd /usr` y luego `pwd` mostraba **la carpeta inicial**; `yes > /dev/null` quedaba **corriendo para siempre** tras el límite de 10 s | `pwd` muestra **`/usr`**; al vencer el tiempo **no queda ningún proceso** |
+| 7 | Ubicación actual en la GUI | servidor + cliente | Solo se veía escribiendo `pwd` | Label **"Ubicacion actual: …"** desde el login, actualizado con cada comando |
+| 8 | Lista de comandos no permitidos | servidor | `rm archivo` **borraba el archivo**; `su -` y `sudo` se ejecutaban | 20 comandos bloqueados: responde exactamente **`comando no permitido`** y no ejecuta nada |
 
 ---
 
@@ -292,6 +298,99 @@ if i := strings.LastIndex(texto, "__DIRECTORIO__"); i >= 0 {
 
 ---
 
+## 7. Ubicación actual en la GUI (`servidor/main.go` y `cliente/main.go`)
+
+**Antes:** la carpeta de la sesión solo se podía ver escribiendo `pwd`.
+
+**Después, en el protocolo:** `Mensaje` tiene un campo nuevo, igual en los dos programas.
+```go
+Directorio        string  `json:"directorio,omitempty"`
+```
+
+**Servidor:** manda la carpeta en el `auth_ok` (la carpeta inicial) y en cada `salida`.
+```go
+// autenticar
+carpeta, _ := os.Getwd()
+enviar(conexion, Mensaje{Tipo: "auth_ok", Contenido: "Autenticacion exitosa", Directorio: carpeta})
+
+// atenderCliente
+if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: string(salida), Directorio: directorio}); err != nil {
+```
+
+**Cliente:**
+```go
+// pedirLogin: la carpeta inicial llega con el auth_ok
+iniciarGUI(programa, enviador, lector, respuesta.Directorio)
+
+// iniciarGUI: el label va encima de la caja de comandos
+textoUbicacion := widget.NewLabel("Ubicacion actual: " + directorio)
+textoUbicacion.Wrapping = fyne.TextWrapBreak
+
+// recibirMensajes, caso "salida": se actualiza junto con la salida del comando
+textoSalida.SetText(salida)
+textoUbicacion.SetText("Ubicacion actual: " + mensaje.Directorio)
+```
+
+**Qué hace cada parte:**
+- **Solo con los comandos:** la carpeta viaja en cada `salida`, así que el label cambia solo cuando se ejecuta un comando y no con los reportes. Hay dos razones:
+  - La carpeta solo puede cambiar con un comando.
+  - `directorio` vive en la goroutine de comandos. Si los reportes también la enviaran, dos goroutines compartirían la variable y haría falta un mutex.
+- **Desde el login:** el `auth_ok` trae la carpeta inicial, así el label ya se ve al abrir la ventana.
+- **`TextWrapBreak`:** parte las rutas largas en varias líneas. Sin esto, una ruta larga obligaba a la ventana a medir 940 px de ancho (medido).
+
+**Cómo explicarlo:** "El servidor ya sabía en qué carpeta está cada sesión. Ahora la manda junto con la salida de cada comando, y el cliente la muestra en un label con `fyne.Do`, igual que los reportes."
+
+---
+
+## 8. Lista de comandos no permitidos (`servidor/main.go`, `comandoPermitido`)
+
+**Antes:** el servidor ejecutaba cualquier comando. Por ejemplo, `rm` borraba archivos y `su -` o `sudo` intentaban cambiar de usuario.
+
+**Después:**
+```go
+// Comandos administrativos que no se permiten ejecutar desde el cliente.
+var comandosNoPermitidos = []string{
+	"su", "sudo", "passwd", "useradd", "userdel", "usermod",
+	"shutdown", "reboot", "poweroff", "systemctl", "kill",
+	"rm", "chmod", "chown", "dd", "mkfs", "fdisk", "mount", "umount",
+	"iptables",
+}
+
+// Revisa solo el comando base (la primera palabra), sin importar sus argumentos.
+func comandoPermitido(comando string) bool {
+	campos := strings.Fields(comando)
+	if len(campos) == 0 {
+		return true
+	}
+	for _, noPermitido := range comandosNoPermitidos {
+		if campos[0] == noPermitido {
+			return false
+		}
+	}
+	return true
+}
+```
+En `atenderCliente`, justo después de revisar el `bye` y antes de ejecutar:
+```go
+if !comandoPermitido(comando) {
+	fmt.Printf("[-] Comando no permitido de '%s': %s\n", usuario, comando)
+	if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: "comando no permitido", Directorio: directorio}); err != nil {
+		break
+	}
+	continue
+}
+```
+
+**Qué hace cada parte:**
+- **`strings.Fields(comando)`:** separa el comando en palabras (por espacios o tabs), y `campos[0]` es el comando base. Por eso `su`, `su -` y `  sudo   ls` se bloquean igual.
+- **`len(campos) == 0`:** si el comando viene vacío, no se intenta leer `campos[0]`, que daría un pánico (*index out of range*).
+- **El `for`:** recorre la lista con el mismo estilo que `usuarioPermitido`. La comparación es exacta, así que `rmdir`, `echo sudo` o `ls rm` sí se permiten.
+- **Si está en la lista:** el servidor responde exactamente `comando no permitido` y anota el intento en su consola. Con `continue` vuelve a esperar el siguiente comando sin ejecutar nada.
+
+**Cómo explicarlo:** "Antes de ejecutar, el servidor toma la primera palabra del comando y la busca en la lista. Si está, no se ejecuta y se responde 'comando no permitido'."
+
+---
+
 ## Pruebas realizadas
 
 ### Servidor (ronda 1: errores 1 a 5)
@@ -364,6 +463,38 @@ El código del cliente no cambió. Se probó la GUI real sin pantalla (`go test 
 | `uname -s` | `Linux` | `Linux` |
 | `bye` | se cierra la ventana (0 abiertas) | se cierra la ventana (0 abiertas) |
 
+### Servidor (ronda 3: ubicación y comandos no permitidos)
+- **La función `comandoPermitido`, probada sola** (sin ejecutar nada):
+  - Se probaron los 20 comandos con 4 variantes cada uno: solo, con `-`, con argumentos (`-rf /tmp/x`), y con espacios y tab alrededor. Se bloquearon **80 de 80**.
+  - Se permiten `ls -la`, `rmdir vacia`, `echo sudo`, `ls rm`, `cat /etc/passwd`, `ps aux`, `cd /usr` y el comando vacío.
+- **De punta a punta,** el servidor de antes (commit `0211941`) contra el corregido. Solo se enviaron comandos de la lista que no hacen daño, sobre archivos de prueba, porque el servidor de antes sí los ejecuta. Los comandos peligrosos de la lista (`shutdown`, `reboot`, `mkfs`…) solo se probaron con la función.
+
+| Prueba | Antes | Después |
+|---|---|---|
+| `auth_ok` | sin carpeta | trae la carpeta del servidor |
+| `cd /usr`, `cd /noexiste` | sin carpeta | `/usr` y `/usr` (el `cd` fallido no mueve) |
+| `rm archivo.txt`, `rm -rf carpeta` | **los borraba** | `comando no permitido`; siguen existiendo |
+| `chmod 000 archivo.txt` | se ejecutaba | `comando no permitido`; los permisos siguen en 644 |
+| `su -` | pedía contraseña y fallaba | `comando no permitido` |
+| `sudo -n true`, `  sudo   -n true`, `kill -0 1` | se ejecutaban | `comando no permitido` |
+| `rmdir vacia`, `echo sudo`, `ls -d /usr/bin` | se ejecutan | se ejecutan igual |
+| `cd /var; sleep 12` | aviso a los 10,0 s | aviso a los 10,1 s; la carpeta sigue en `/usr` |
+| `bye` | correcto | correcto |
+
+### Cliente (ronda 3: ubicación y comandos no permitidos)
+GUI real sin pantalla (`go test -tags ci`), contra el servidor corregido:
+
+| Paso en la GUI | Label "Ubicacion actual" | Salida |
+|---|---|---|
+| Al abrir la ventana tras el login | carpeta del servidor | — |
+| `cd /usr` | `/usr` | `(comando ejecutado sin salida)` |
+| `sudo ls`, `su -`, `rm -rf /tmp/nada` | `/usr` | `comando no permitido` |
+| `cd /noexiste` | `/usr` | error de bash |
+| `cd share`, luego `pwd` | `/usr/share` | `/usr/share` |
+| Llega un reporte | sin cambios | — |
+| `cd` a una ruta de 150 caracteres | se parte en varias líneas; el label pide 16 px de ancho mínimo (940 px sin `Wrapping`) | — |
+| `bye` | — | se cierra la ventana (0 abiertas) |
+
 ### Validación estática
 - `gofmt`: sin archivos mal formateados.
 - `go vet ./servidor` (Linux) y `go vet ./cliente` (Windows): sin advertencias.
@@ -385,4 +516,11 @@ Se dejaron así para que el código siga siendo simple de explicar:
 - **Comandos en segundo plano** (`sleep 100 &`) siguen corriendo hasta terminar, aunque el servidor ya no los espera.
 - **Solo se mantiene la carpeta,** no las variables: `export X=1` se pierde en el siguiente comando, porque cada comando es un bash nuevo.
 - **`cd -` no vuelve a la carpeta anterior de la sesión,** porque cada bash nuevo no la conoce. Según cómo se lanzó el servidor, responde "OLDPWD no establecido" o va a la carpeta anterior de la terminal donde se arrancó el servidor.
+- **La lista de comandos no permitidos revisa solo la primera palabra.** No bloquea:
+  - rutas completas (`/bin/rm`),
+  - comandos encadenados (`ls; rm x`),
+  - variantes con otro nombre (`mkfs.ext4`),
+  - ni comandos lanzados por otro programa (`bash -c "rm x"`).
+
+  Es un filtro de la interfaz, no una barrera de seguridad completa. La protección real es el usuario de Linux con el que corre el servidor.
 - **Si se presiona Ctrl+C en la consola del servidor mientras corre un comando,** ese comando no recibe el Ctrl+C, porque está en su propio grupo de procesos: termina solo o cuando se cierra su salida.

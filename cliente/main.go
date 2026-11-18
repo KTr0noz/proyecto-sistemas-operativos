@@ -25,6 +25,7 @@ type Mensaje struct {
 	PorcentajeCPU     float64 `json:"porcentaje_cpu,omitempty"`
 	PorcentajeRAM     float64 `json:"porcentaje_ram,omitempty"`
 	PorcentajeDisco   float64 `json:"porcentaje_disco,omitempty"`
+	Directorio        string  `json:"directorio,omitempty"`
 }
 
 func main() {
@@ -137,7 +138,7 @@ func pedirLogin(programa fyne.App, enviador *json.Encoder, lector *json.Decoder,
 				}
 
 				if respuesta.Tipo == "auth_ok" {
-					iniciarGUI(programa, enviador, lector)
+					iniciarGUI(programa, enviador, lector, respuesta.Directorio)
 					ventana.Close()
 					return
 				}
@@ -187,8 +188,11 @@ func autenticar(enviador *json.Encoder, lector *json.Decoder, usuario, password 
 }
 
 // Ventana 3: la ventana principal OperGUI (comandos + reportes con 3 barras).
-func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder) {
+func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder, directorio string) {
 	ventana := programa.NewWindow("Proyecto Operativos - Ramos")
+
+	textoUbicacion := widget.NewLabel("Ubicacion actual: " + directorio)
+	textoUbicacion.Wrapping = fyne.TextWrapBreak
 
 	cajaComando := widget.NewEntry()
 	cajaComando.SetPlaceHolder("Digite el comando UNIX (o 'bye' para salir)")
@@ -228,6 +232,7 @@ func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder)
 	cajaComando.OnSubmitted = enviarComando
 
 	ventana.SetContent(container.NewVBox(
+		textoUbicacion,
 		cajaComando,
 		botonEjecutar,
 		widget.NewLabel("Salida del comando:"),
@@ -249,6 +254,7 @@ func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder)
 		ventana,
 		textoSalida,
 		textoReporte,
+		textoUbicacion,
 		barraCPU,
 		barraRAM,
 		barraDisco,
@@ -262,6 +268,7 @@ func recibirMensajes(
 	ventana fyne.Window,
 	textoSalida *widget.Label,
 	textoReporte *widget.Label,
+	textoUbicacion *widget.Label,
 	barraCPU *widget.ProgressBar,
 	barraRAM *widget.ProgressBar,
 	barraDisco *widget.ProgressBar,
@@ -290,6 +297,7 @@ func recibirMensajes(
 			}
 			fyne.Do(func() {
 				textoSalida.SetText(salida)
+				textoUbicacion.SetText("Ubicacion actual: " + mensaje.Directorio)
 			})
 		case "bye":
 			fyne.Do(func() {

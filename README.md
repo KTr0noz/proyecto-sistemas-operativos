@@ -57,6 +57,8 @@ cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\
 2. **Ventana de login (`Proyecto Operativos - Login`):** al conectar, la ventana anterior se cierra. Ingresa usuario (`admin`) y contraseña (`linux`, oculta) y presiona **Ingresar** (o `Enter`).
 3. Al autenticarse correctamente, se abrirá la ventana **OperGUI (`Proyecto Operativos - Ramos`)**:
    * **Comandos UNIX:** Escribe comandos como `uname -a`, `ls -la`, `ps aux` en la caja de texto y presiona **Ejecutar** (o `Enter`). La salida aparece en el panel con desplazamiento sin mezclarse con los reportes. Un `cd` (por ejemplo `cd /tmp`) se mantiene para los comandos siguientes.
+   * **Ubicacion actual:** encima de la caja de comandos se muestra la carpeta del servidor donde se ejecutan los comandos; se actualiza con cada comando.
+   * **Comandos no permitidos:** los comandos administrativos de la lista (`su`, `sudo`, `rm`, `shutdown`, `systemctl`, etc.) no se ejecutan y responden `comando no permitido`.
    * **Monitoreo en paralelo:** Cada $n$ segundos se actualiza el texto de `Reporte #N` y las **3 barras de progreso** en tiempo real (**CPU**, **RAM** y **Disco**).
    * **Salir:** Escribe `bye` y presiona **Ejecutar** (o cierra la ventana).
 
@@ -71,10 +73,12 @@ cd "c:\Carpetas\estudio\Universidad\Semestres\Cuarto Semestre\Operating Systems\
    * Goroutine periódica `enviarReportes`: lee `/proc/stat` (`leerCPU`, con dos muestras separadas 0,5 s), `/proc/meminfo` (`leerRAM`), procesos en `/proc` (`contarProcesos`) y `df /` (`leerDisco`) cada $n$ segundos, enviando el resumen y los porcentajes numéricos.
    * Bucle principal en `atenderCliente`: atiende comandos remotos ejecutando `bash -c <comando>` (máximo 10 segundos y 64 KB de salida) y cierra sesión al recibir `bye`.
    * Cada sesión guarda su carpeta actual en la variable `directorio`. Cada comando se ejecuta ahí y, al terminar, bash informa en qué carpeta quedó (`trap ... EXIT`), así un `cd` se mantiene entre comandos. Si se vence el tiempo, se mata el grupo de procesos completo (`Setpgid`), para no dejar procesos huérfanos.
+   * Antes de ejecutar, `comandoPermitido` revisa la primera palabra del comando contra `comandosNoPermitidos` (20 comandos administrativos). Si está en la lista, responde `comando no permitido` sin ejecutar nada.
+   * La carpeta de la sesión viaja en el campo `Directorio` del `auth_ok` y de cada `salida`.
 
 ### Cliente (`cliente/main.go`)
 1. `pedirParametros(...)`: Ventana de conexion con IP, puerto y periodo (se llenan solos si se pasan `<IP> <Puerto> <PeriodoReporte>` al ejecutar). Al presionar **Conectar** valida el periodo y abre el socket con `net.DialTimeout` dentro de una goroutine, para que la ventana no se congele.
 2. `pedirLogin(...)`: Ventana de login con usuario y contraseña (`widget.NewPasswordEntry`). `autenticar(...)` envia las credenciales y espera la respuesta del servidor, tambien en una goroutine.
    * Cada goroutine vuelve al hilo de la GUI con `fyne.Do(...)` para cambiar de ventana: primero abre la nueva y luego cierra la anterior, porque Fyne termina la app cuando no queda ninguna ventana abierta.
-3. `iniciarGUI(...)`: Construye la ventana Fyne con caja de comandos, botón `Ejecutar`, panel de salida y 3 barras (`barraCPU`, `barraRAM`, `barraDisco`).
-4. `recibirMensajes(...)`: Goroutine en segundo plano que actualiza la interfaz mediante `fyne.Do(...)` cada vez que llega un reporte o una salida de comando.
+3. `iniciarGUI(...)`: Construye la ventana Fyne con la ubicación actual (`textoUbicacion`), caja de comandos, botón `Ejecutar`, panel de salida y 3 barras (`barraCPU`, `barraRAM`, `barraDisco`).
+4. `recibirMensajes(...)`: Goroutine en segundo plano que actualiza la interfaz mediante `fyne.Do(...)` cada vez que llega un reporte o una salida de comando. La ubicación se actualiza solo con las salidas de comandos, no con los reportes.
