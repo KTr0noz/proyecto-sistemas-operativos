@@ -15,4 +15,7 @@ echo "==> Compilando Cliente OperGUI (Fyne) para Windows (amd64)..."
 # -H=windowsgui: app grafica normal de Windows (no abre consola)
 CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -trimpath -ldflags="-s -w -H=windowsgui" -o dist/windows-amd64/clienteOperativos.exe ./cliente
 
-ls -lh dist/linux-amd64/ dist/windows-amd64/clienteOperativos.exe
+echo "==> Compilando herramienta de medicion de latencia para Windows (amd64)..."
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/windows-amd64/medirLatencia.exe ./medicion
+
+ls -lh dist/linux-amd64/ dist/windows-amd64/

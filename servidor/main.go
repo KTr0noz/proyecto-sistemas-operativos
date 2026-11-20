@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,16 +39,23 @@ type Configuracion struct {
 }
 
 func main() {
+	// Los comandos del cliente se ejecutan con el usuario del servidor: como root
+	// podrian borrar o cambiar cualquier cosa del sistema.
+	if os.Geteuid() == 0 {
+		fmt.Println("Error: por seguridad el servidor no se ejecuta como root. Inicielo con un usuario normal.")
+		os.Exit(1)
+	}
+
 	config, err := leerConfiguracion("servidor.conf")
 	if err != nil {
 		fmt.Printf("Error cargando servidor.conf: %v\n", err)
-		return
+		os.Exit(1)
 	}
 
 	oyente, err := net.Listen("tcp", ":"+config.Puerto)
 	if err != nil {
 		fmt.Printf("Error iniciando socket servidor: %v\n", err)
-		return
+		os.Exit(1)
 	}
 	defer oyente.Close()
 
@@ -77,6 +88,12 @@ func atenderCliente(conexion net.Conn, config Configuracion) {
 
 	if config.IPPermitida != "*" && config.IPPermitida != ipCliente {
 		fmt.Printf("[-] Conexion rechazada: IP %s no autorizada en servidor.conf\n", ipCliente)
+		enviar(conexion, Mensaje{Tipo: "rechazo", Contenido: "la IP " + ipCliente + " no esta autorizada en el servidor."})
+		return
+	}
+
+	// Saludo inicial: le confirma al cliente que en este puerto esta el servidor del proyecto.
+	if err := enviar(conexion, Mensaje{Tipo: "bienvenida", Contenido: "Servidor Operativos"}); err != nil {
 		return
 	}
 
@@ -92,6 +109,8 @@ func atenderCliente(conexion net.Conn, config Configuracion) {
 	// del servidor y cambia cuando el usuario hace cd.
 	carpetaInicial, _ := os.Getwd()
 	directorio := carpetaInicial
+	carpetaAnterior := ""  // para cd -
+	var historial []string // comandos de la sesion, para history
 
 	for {
 		var mensaje Mensaje
@@ -104,60 +123,122 @@ func atenderCliente(conexion net.Conn, config Configuracion) {
 		}
 
 		comando := strings.TrimSpace(mensaje.Contenido)
-		if strings.EqualFold(comando, "bye") {
-			fmt.Printf("[*] Usuario '%s' envio 'bye'. Cerrando sesion.\n", usuario)
+		if strings.EqualFold(comando, "bye") || comando == "exit" || comando == "logout" {
+			fmt.Printf("[*] Usuario '%s' envio '%s'. Cerrando sesion.\n", usuario, comando)
 			enviar(conexion, Mensaje{Tipo: "bye", Contenido: "Sesion finalizada."})
 			break
 		}
-
-		if !comandoPermitido(comando) {
-			fmt.Printf("[-] Comando no permitido de '%s': %s\n", usuario, comando)
-			if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: "comando no permitido", Directorio: directorio}); err != nil {
-				break
-			}
-			continue
-		}
+		historial = append(historial, comando)
 
 		// Si la carpeta guardada ya no existe (la borraron), se vuelve a la inicial.
 		if _, err := os.Stat(directorio); err != nil {
 			directorio = carpetaInicial
 		}
 
-		fmt.Printf("[*] Ejecutando comando de '%s' en %s: %s\n", usuario, directorio, comando)
-		ctx, cancelar := context.WithTimeout(context.Background(), 10*time.Second)
-		// Al terminar, bash imprime la carpeta donde quedo (por si el comando hizo cd).
-		comandoBash := exec.CommandContext(ctx, "bash", "-c", `trap 'echo "__DIRECTORIO__$PWD"' EXIT; `+comando)
-		comandoBash.Dir = directorio
-		// bash y sus hijos van en un grupo de procesos propio: si se vence el tiempo
-		// se mata el grupo completo (pid negativo) y no quedan procesos huerfanos.
-		comandoBash.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		comandoBash.Cancel = func() error {
-			return syscall.Kill(-comandoBash.Process.Pid, syscall.SIGKILL)
-		}
-		comandoBash.WaitDelay = time.Second
-		salida, err := comandoBash.CombinedOutput()
-		cancelar()
-
-		// Se separa la carpeta (lo que va despues de la marca) del resto de la salida.
-		texto := string(salida)
-		if i := strings.LastIndex(texto, "__DIRECTORIO__"); i >= 0 {
-			directorio = strings.TrimSuffix(texto[i+len("__DIRECTORIO__"):], "\n")
-			salida = salida[:i]
+		var salida string
+		if comando == "history" {
+			// bash -c no guarda historial, asi que lo lleva el servidor.
+			for i, c := range historial {
+				salida += fmt.Sprintf("%5d  %s\n", i+1, c)
+			}
+		} else if aviso := revisarComando(comando); aviso != "" {
+			fmt.Printf("[-] Comando de '%s' no ejecutado: %s -> %s\n", usuario, comando, aviso)
+			salida = aviso
+		} else {
+			fmt.Printf("[*] Ejecutando comando de '%s' en %s: %s\n", usuario, directorio, comando)
+			var nuevoDirectorio string
+			salida, nuevoDirectorio = ejecutarComando(comando, directorio, carpetaAnterior)
+			if nuevoDirectorio != directorio {
+				carpetaAnterior, directorio = directorio, nuevoDirectorio
+			}
 		}
 
-		if ctx.Err() == context.DeadlineExceeded {
-			salida = append(salida, "\n[Comando detenido: supero el tiempo limite de 10 segundos]\n"...)
-		} else if err != nil && len(salida) == 0 {
-			salida = []byte(fmt.Sprintf("Error ejecutando: %v\n", err))
-		}
-		if len(salida) > 64*1024 {
-			salida = append(salida[:64*1024], "\n[Salida recortada a 64 KB]\n"...)
-		}
-
-		if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: string(salida), Directorio: directorio}); err != nil {
+		if err := enviar(conexion, Mensaje{Tipo: "salida", Contenido: salida, Directorio: directorio}); err != nil {
 			break
 		}
 	}
+}
+
+// salidaLimitada guarda la salida de un comando, pero como maximo 64 KB. Cuando se llena,
+// Write devuelve un error: Go deja de leer y cierra la tuberia, y el comando que siga
+// escribiendo (por ejemplo yes) termina solo. Asi la salida nunca ocupa mas de 64 KB.
+type salidaLimitada struct {
+	datos     []byte
+	recortada bool
+}
+
+func (s *salidaLimitada) Write(p []byte) (int, error) {
+	espacio := 64*1024 - len(s.datos)
+	if len(p) > espacio {
+		s.datos = append(s.datos, p[:espacio]...)
+		s.recortada = true
+		return espacio, errors.New("salida mayor a 64 KB")
+	}
+	s.datos = append(s.datos, p...)
+	return len(p), nil
+}
+
+// Codigos de color y de pantalla de las terminales (ESC [ ... letra). La ventana del
+// cliente no los entiende y los mostraria como simbolos raros.
+var codigosTerminal = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+
+// Ejecuta el comando con bash en la carpeta de la sesion. Devuelve la salida lista para
+// el cliente y la carpeta donde quedo bash (por si el comando hizo cd).
+func ejecutarComando(comando, directorio, carpetaAnterior string) (string, string) {
+	ctx, cancelar := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelar()
+
+	// Al terminar, bash imprime la carpeta donde quedo (por si el comando hizo cd).
+	bash := exec.CommandContext(ctx, "bash", "-c", `trap 'echo "__DIRECTORIO__$PWD"' EXIT; `+comando)
+	bash.Dir = directorio
+	// TERM=dumb: los programas no envian colores ni codigos de pantalla.
+	// OLDPWD: la carpeta anterior de la sesion, para que funcione cd -.
+	bash.Env = append(os.Environ(), "TERM=dumb", "OLDPWD="+carpetaAnterior)
+	// Setsid: bash y sus hijos van en una sesion y un grupo de procesos propios, sin terminal.
+	// Asi se puede matar el grupo completo (pid negativo), y un programa que intente leer
+	// del teclado (una contrasena, por ejemplo) falla de inmediato en vez de quedarse esperando.
+	bash.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	bash.Cancel = func() error {
+		return syscall.Kill(-bash.Process.Pid, syscall.SIGKILL)
+	}
+	// Si un proceso en segundo plano deja abierta la salida, se espera como maximo 1 s.
+	bash.WaitDelay = time.Second
+	var salida salidaLimitada
+	bash.Stdout = &salida
+	bash.Stderr = &salida
+	err := bash.Run()
+
+	// Si quedaron procesos en segundo plano (comando &), se matan con todo el grupo.
+	// Kill solo devuelve nil si el grupo todavia tenia procesos.
+	quedaronProcesos := bash.Process != nil && syscall.Kill(-bash.Process.Pid, syscall.SIGKILL) == nil
+
+	// Se separa la carpeta (lo que va despues de la marca) del resto de la salida.
+	texto := string(salida.datos)
+	if i := strings.LastIndex(texto, "__DIRECTORIO__"); i >= 0 && !salida.recortada {
+		directorio = strings.TrimSuffix(texto[i+len("__DIRECTORIO__"):], "\n")
+		texto = texto[:i]
+	}
+	texto = codigosTerminal.ReplaceAllString(texto, "")
+
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		texto += "\n[Comando detenido: supero el tiempo limite de 10 segundos]\n"
+	case salida.recortada:
+		texto += "\n[Salida recortada a 64 KB]\n"
+	case quedaronProcesos:
+		texto += "\n[Los procesos en segundo plano (&) se detuvieron al terminar el comando]\n"
+	case err != nil && texto == "":
+		texto = fmt.Sprintf("Error ejecutando: %v\n", err)
+	}
+	// Un archivo binario (por ejemplo cat /bin/ls) no es texto: llenaria la ventana de simbolos.
+	if strings.ContainsRune(texto, 0) {
+		texto = "[El comando devolvio datos binarios; no se muestran]\n"
+	}
+	// Cada comando es un bash nuevo: las variables y los alias no pasan al siguiente comando.
+	if strings.HasPrefix(comando, "export ") || strings.HasPrefix(comando, "alias ") {
+		texto += "[Aviso: cada comando se ejecuta en un bash nuevo, asi que la variable\n o el alias no pasa al siguiente comando. Use: export X=1 && echo $X]\n"
+	}
+	return texto, directorio
 }
 
 func autenticar(conexion net.Conn, lector *json.Decoder, config Configuracion, ipCliente string) (string, int, bool) {
@@ -310,23 +391,47 @@ func usuarioPermitido(usuario string, permitidos []string) bool {
 // Comandos administrativos que no se permiten ejecutar desde el cliente.
 var comandosNoPermitidos = []string{
 	"su", "sudo", "passwd", "useradd", "userdel", "usermod",
-	"shutdown", "reboot", "poweroff", "systemctl", "kill",
+	"shutdown", "reboot", "poweroff", "halt", "systemctl",
+	"kill", "pkill", "killall",
 	"rm", "chmod", "chown", "dd", "mkfs", "fdisk", "mount", "umount",
 	"iptables",
 }
 
-// Revisa solo el comando base (la primera palabra), sin importar sus argumentos.
-func comandoPermitido(comando string) bool {
-	campos := strings.Fields(comando)
-	if len(campos) == 0 {
-		return true
-	}
-	for _, noPermitido := range comandosNoPermitidos {
-		if campos[0] == noPermitido {
-			return false
+// Programas de pantalla completa: necesitan una terminal real y por el socket no hay una.
+var comandosInteractivos = map[string]string{
+	"nano":  "Use cat archivo para verlo o echo texto > archivo para escribirlo.",
+	"vi":    "Use cat archivo para verlo o echo texto > archivo para escribirlo.",
+	"vim":   "Use cat archivo para verlo o echo texto > archivo para escribirlo.",
+	"top":   "Use top -bn1.",
+	"htop":  "Use top -bn1.",
+	"watch": "Ejecute el comando sin watch.",
+}
+
+// Revisa el programa con el que empieza cada parte de la linea (las partes se separan
+// con ; & | ( ) o comillas invertidas), asi "ls; rm x" o "ls && /bin/rm x" tambien se
+// detectan. Devuelve el mensaje para el cliente, o "" si el comando se puede ejecutar.
+func revisarComando(linea string) string {
+	separador := func(r rune) bool { return strings.ContainsRune(";&|()`\n", r) }
+	for _, parte := range strings.FieldsFunc(linea, separador) {
+		palabras := strings.Fields(parte)
+		if len(palabras) == 0 {
+			continue
+		}
+		// Sin comillas ni ruta: "rm", \rm y /bin/rm cuentan como rm.
+		programa := filepath.Base(strings.Trim(palabras[0], `"'\`))
+		if slices.Contains(comandosNoPermitidos, programa) {
+			return "comando no permitido"
+		}
+
+		consejo, interactivo := comandosInteractivos[programa]
+		if programa == "top" && strings.Contains(parte, "-b") {
+			interactivo = false // top -b (modo por lotes) si funciona sin terminal
+		}
+		if interactivo {
+			return "comando interactivo no soportado: " + programa + " necesita una terminal.\n" + consejo
 		}
 	}
-	return true
+	return ""
 }
 
 func obtenerReporte() (string, float64, float64, float64) {

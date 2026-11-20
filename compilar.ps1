@@ -27,6 +27,11 @@ $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '1'
 go build -trimpath -ldflags '-s -w -H=windowsgui' -o dist\windows-amd64\clienteOperativos.exe .\cliente
 if ($LASTEXITCODE -ne 0) { throw 'Error compilando clienteOperativos.exe para Windows' }
 
+Write-Host '==> Compilando herramienta de medicion de latencia para Windows (amd64)...'
+$env:CGO_ENABLED = '0'
+go build @flags -o dist\windows-amd64\medirLatencia.exe .\medicion
+if ($LASTEXITCODE -ne 0) { throw 'Error compilando medirLatencia.exe para Windows' }
+
 Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
 Write-Host '==> Compilacion exitosa. Archivos generados:'
 Get-ChildItem -Recurse dist -File | Select-Object @{n='Archivo';e={$_.FullName.Replace("$PWD\", '')}}, @{n='Tamano_KB';e={[math]::Round($_.Length/1KB)}} | Format-Table -AutoSize

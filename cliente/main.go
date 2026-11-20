@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -70,20 +72,28 @@ func pedirParametros(programa fyne.App) {
 			textoEstado.SetText("Error: PeriodoReporte debe ser un numero entero entre 1 y 3600.")
 			return
 		}
+		if net.ParseIP(ip) == nil {
+			textoEstado.SetText("Error: la IP \"" + ip + "\" no es valida. Escriba una IP como 192.168.1.10.")
+			return
+		}
+		if numero, err := strconv.Atoi(puerto); err != nil || numero < 1 || numero > 65535 {
+			textoEstado.SetText("Error: el puerto debe ser un numero entre 1 y 65535.")
+			return
+		}
 
 		botonConectar.Disable()
-		textoEstado.SetText("Conectando a " + ip + ":" + puerto + "...")
+		textoEstado.SetText("Conectando a " + ip + ":" + puerto + "... (hasta 5 segundos)")
 
 		// La conexion se hace en una goroutine para que la ventana no se congele.
 		go func() {
-			conexion, err := net.DialTimeout("tcp", ip+":"+puerto, 5*time.Second)
+			conexion, lector, problema := conectar(ip, puerto)
 			fyne.Do(func() {
-				if err != nil {
-					textoEstado.SetText(fmt.Sprintf("Error conectando a %s:%s -> %v", ip, puerto, err))
+				if problema != "" {
+					textoEstado.SetText(problema)
 					botonConectar.Enable()
 					return
 				}
-				pedirLogin(programa, json.NewEncoder(conexion), json.NewDecoder(conexion), periodo)
+				pedirLogin(programa, json.NewEncoder(conexion), lector, periodo)
 				ventana.Close()
 			})
 		}()
@@ -103,6 +113,39 @@ func pedirParametros(programa fyne.App) {
 
 	ventana.Resize(fyne.NewSize(400, 0))
 	ventana.Show()
+}
+
+// Abre la conexion y espera el saludo del servidor. Si algo falla, devuelve el
+// mensaje de error que se le muestra al usuario.
+func conectar(ip, puerto string) (net.Conn, *json.Decoder, string) {
+	conexion, err := net.DialTimeout("tcp", net.JoinHostPort(ip, puerto), 5*time.Second)
+	if err != nil {
+		var codigo syscall.Errno
+		// Conexion rechazada: la IP existe pero nadie escucha en ese puerto
+		// (ECONNREFUSED en Linux, codigo 10061 en Windows).
+		if errors.As(err, &codigo) && (codigo == syscall.ECONNREFUSED || codigo == 10061) {
+			return nil, nil, fmt.Sprintf("Error: la IP %s respondio, pero el puerto %s esta cerrado o es equivocado (el servidor no esta escuchando en ese puerto).", ip, puerto)
+		}
+		return nil, nil, fmt.Sprintf("Error de conexion: la IP %s no responde. Verifique que la IP exista y que el servidor este encendido y en la misma red.", ip)
+	}
+
+	// El servidor saluda apenas acepta la conexion. Si en 5 s no llega el saludo,
+	// en ese puerto hay otro programa que no es el servidor del proyecto.
+	lector := json.NewDecoder(conexion)
+	var saludo Mensaje
+	conexion.SetReadDeadline(time.Now().Add(5 * time.Second))
+	err = lector.Decode(&saludo)
+	conexion.SetReadDeadline(time.Time{})
+
+	if err != nil || (saludo.Tipo != "bienvenida" && saludo.Tipo != "rechazo") {
+		conexion.Close()
+		return nil, nil, fmt.Sprintf("Error: el puerto %s esta ocupado por otro programa o es equivocado (no respondio el servidor del proyecto).", puerto)
+	}
+	if saludo.Tipo == "rechazo" {
+		conexion.Close()
+		return nil, nil, "Error: " + saludo.Contenido
+	}
+	return conexion, lector, ""
 }
 
 // Ventana 2: pide usuario y contrasena y los valida con el servidor.
@@ -197,9 +240,11 @@ func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder,
 	cajaComando := widget.NewEntry()
 	cajaComando.SetPlaceHolder("Digite el comando UNIX (o 'bye' para salir)")
 
-	textoSalida := widget.NewLabel("Esperando comando...")
-	panelSalida := container.NewScroll(textoSalida)
-	panelSalida.SetMinSize(fyne.NewSize(500, 180))
+	// TextGrid: panel con letra monoespaciada, como una terminal. Solo dibuja las filas
+	// que se ven, por eso una salida grande no congela la ventana.
+	textoSalida := widget.NewTextGrid()
+	textoSalida.Scroll = fyne.ScrollBoth
+	textoSalida.SetText("Esperando comando...")
 
 	textoReporte := widget.NewLabel("Esperando reporte de recursos...")
 
@@ -218,6 +263,13 @@ func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder,
 			return
 		}
 
+		// clear: limpia el panel aqui mismo, no hace falta ir al servidor.
+		if comando == "clear" {
+			textoSalida.SetText("")
+			cajaComando.SetText("")
+			return
+		}
+
 		if err := enviador.Encode(Mensaje{Tipo: "comando", Contenido: comando}); err != nil {
 			textoSalida.SetText("Error enviando comando al servidor.")
 			return
@@ -231,12 +283,13 @@ func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder,
 	})
 	cajaComando.OnSubmitted = enviarComando
 
-	ventana.SetContent(container.NewVBox(
+	arriba := container.NewVBox(
 		textoUbicacion,
 		cajaComando,
 		botonEjecutar,
 		widget.NewLabel("Salida del comando:"),
-		panelSalida,
+	)
+	abajo := container.NewVBox(
 		widget.NewSeparator(),
 		textoReporte,
 		widget.NewLabel("CPU (%):"),
@@ -245,9 +298,11 @@ func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder,
 		barraRAM,
 		widget.NewLabel("Disco (%):"),
 		barraDisco,
-	))
+	)
+	// La salida va en el centro y ocupa el espacio que sobra (crece con la ventana).
+	ventana.SetContent(container.NewBorder(arriba, abajo, nil, nil, textoSalida))
 
-	ventana.Resize(fyne.NewSize(560, 460))
+	ventana.Resize(fyne.NewSize(640, 700))
 
 	go recibirMensajes(
 		lector,
@@ -266,7 +321,7 @@ func iniciarGUI(programa fyne.App, enviador *json.Encoder, lector *json.Decoder,
 func recibirMensajes(
 	lector *json.Decoder,
 	ventana fyne.Window,
-	textoSalida *widget.Label,
+	textoSalida *widget.TextGrid,
 	textoReporte *widget.Label,
 	textoUbicacion *widget.Label,
 	barraCPU *widget.ProgressBar,
@@ -295,8 +350,17 @@ func recibirMensajes(
 			if salida == "" {
 				salida = "(comando ejecutado sin salida)"
 			}
+			// El panel reserva en cada fila tantas celdas como letras tenga la linea mas
+			// larga: las lineas muy largas se cortan para que la ventana no se ponga lenta.
+			lineas := strings.Split(salida, "\n")
+			for i, linea := range lineas {
+				if letras := []rune(linea); len(letras) > 500 {
+					lineas[i] = string(letras[:500]) + " ..."
+				}
+			}
 			fyne.Do(func() {
-				textoSalida.SetText(salida)
+				textoSalida.SetText(strings.Join(lineas, "\n"))
+				textoSalida.ScrollToTop()
 				textoUbicacion.SetText("Ubicacion actual: " + mensaje.Directorio)
 			})
 		case "bye":
